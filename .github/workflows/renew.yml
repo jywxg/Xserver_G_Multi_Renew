@@ -1,10 +1,10 @@
 name: XServer Extend (Node.js Matrix)
 
 on:
-  schedule:
-    - cron: '0 22 * * *' # JST 07:00
-    - cron: '0 6 * * *'  # JST 15:00
-    - cron: '0 14 * * *' # JST 23:00
+  #schedule:
+    #- cron: '0 22 * * *' # JST 07:00
+    #- cron: '0 6 * * *'  # JST 15:00
+    #- cron: '0 14 * * *' # JST 23:00
   workflow_dispatch:
     inputs:
       force:
