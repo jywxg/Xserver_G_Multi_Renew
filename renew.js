@@ -6,7 +6,7 @@ const ACC = process.env.ACC || process.env.EML;
 const ACC_PWD = process.env.ACC_PWD || process.env.PWD;
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_ID = process.env.TG_ID;
-const PROXY_URL = process.env.PROXY_URL;
+const NODE_LINK = process.env.NODE_LINK;
 
 // T 延迟控制（单位：分钟）
 const T = process.env.T;
@@ -315,7 +315,7 @@ async function tryRenew(page, beforeMins, thresholdHours) {
   checkScheduling();
 
   var launchOpts = { headless: true, channel: 'chrome' };
-  if (PROXY_URL) launchOpts.proxy = { server: 'http://127.0.0.1:8080' };
+  if (NODE_LINK) launchOpts.proxy = { server: 'http://127.0.0.1:1080' };
   var browser = await chromium.launch(launchOpts);
   var context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   var page = await context.newPage();
@@ -323,7 +323,7 @@ async function tryRenew(page, beforeMins, thresholdHours) {
   var thresholdHours = null;
 
   try {
-    if (PROXY_URL) {
+    if (NODE_LINK) {
       console.log('🌐 检查代理 IP...');
       try {
         await page.goto('https://api.ipify.org/?format=json', { timeout: 15000 });
