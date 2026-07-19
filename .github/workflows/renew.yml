@@ -76,28 +76,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq fonts-noto-cjk python3 wget
 
-      - name: Start Proxy Tunnel
+      - name: ⚙ 设置代理 (sing-box)
         env:
-          PROXY_URL: ${{ secrets.PROXY_URL }}
+          NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          if [ -z "$PROXY_URL" ]; then exit 0; fi
-          SINGBOX_VER="1.11.0"
-          echo "📦 下载 sing-box v${SINGBOX_VER}..."
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
-          tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
-          mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
-          chmod +x ./sing-box
-          echo "🔗 解析代理协议..."
-          python3 proxy_handler.py
-          if [ -f config.json ]; then
-            echo "✅ 代理配置已生成"
-            nohup ./sing-box run -c config.json > singbox.log 2>&1 &
-            sleep 5
-            echo "✅ Proxy tunnel started"
-          else
-            echo "❌ 代理配置生成失败"
-            exit 1
-          fi
+          chmod +x setup_proxy.sh
+          bash setup_proxy.sh
 
       - name: Run Extension Script
         env:
