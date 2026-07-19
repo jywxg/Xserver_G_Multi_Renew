@@ -48,7 +48,7 @@
 | `T` | ❌ | 延迟控制（见下方说明） |
 | `TG_TOKEN` | ❌ | Telegram Bot Token（从 @BotFather 获取） |
 | `TG_ID` | ❌ | 接收通知的用户/群组 ID |
-| `PROXY_URL` | ❌ | 代理链接 |
+| `NODE_LINK` | ❌ | 代理链接 |
 
 #### T 延迟控制
 
