@@ -76,7 +76,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq fonts-noto-cjk python3 wget
 
-      - name: ⚙ 设置代理 (sing-box)
+      - name: Start Proxy Tunnel
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
