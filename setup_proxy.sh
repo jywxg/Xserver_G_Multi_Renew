@@ -349,6 +349,8 @@ EOF
     echo "[INFO] ✅ 节点 [$node_idx] 连接成功！ | 📍 IP: $ip_addr | 🌍 国家: $country"
     echo "IS_PROXY=true" >> $GITHUB_ENV
     echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
+    echo "PROXY_IP=$ip_addr" >> $GITHUB_ENV
+    echo "PROXY_COUNTRY=$country" >> $GITHUB_ENV
     exit 0
   else
     echo "[WARN] ❌ 节点 [$node_idx] 无法连接或超时，尝试下一个节点..."
