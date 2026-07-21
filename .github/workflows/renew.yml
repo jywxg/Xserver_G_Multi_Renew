@@ -94,6 +94,10 @@ jobs:
           T: ${{ secrets.T }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           FORCE: ${{ inputs.force || false }}
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          IS_PROXY: ${{ env.IS_PROXY }}
+          PROXY_IP: ${{ env.PROXY_IP }}
+          PROXY_COUNTRY: ${{ env.PROXY_COUNTRY }}
         run: node renew.js
 
       - name: Upload Screenshots
