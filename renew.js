@@ -8,6 +8,19 @@ const TG_TOKEN = process.env.TG_TOKEN;
 const TG_ID = process.env.TG_ID;
 const NODE_LINK = process.env.NODE_LINK;
 
+// 代理信息
+const IS_PROXY = process.env.IS_PROXY === 'true';
+const PROXY_IP = process.env.PROXY_IP || '';
+const PROXY_COUNTRY = process.env.PROXY_COUNTRY || '';
+
+function getNetText() {
+  if (IS_PROXY) {
+    var loc = PROXY_COUNTRY ? ' (' + PROXY_COUNTRY + ')' : '';
+    return '网络: 🌐 代理 [' + (PROXY_IP || '未知IP') + loc + ']';
+  }
+  return '网络: ⚡ 直连';
+}
+
 // T 延迟控制（单位：分钟）
 const T = process.env.T;
 const IS_MANUAL = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' || !process.env.GITHUB_ACTIONS;
@@ -98,7 +111,7 @@ async function sendTGOnce(statusIcon, statusText, extra, imagePath) {
   try {
     var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
     var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n账号: ' + ACC + '\n' + getNetText() + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
     if (imagePath && fs.existsSync(imagePath)) {
       var fileData = fs.readFileSync(imagePath);
       var fd = new FormData();
@@ -131,7 +144,7 @@ async function sendTG(statusIcon, statusText, extra, imagePath) {
   try {
     var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
     var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n账号: ' + ACC + '\n' + getNetText() + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
     if (imagePath && fs.existsSync(imagePath)) {
       var fileData = fs.readFileSync(imagePath);
       var fd = new FormData();
