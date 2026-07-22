@@ -316,27 +316,29 @@ async function tryRenew(page, beforeMins, thresholdHours) {
 
 // ── 主流程 ──
 
-(async function main() {
+async function runRenew(useProxy) {
+  let proxyStatus = useProxy ? (process.env.PROXY_STATUS || '代理') : '直连';
+  
   console.log('==================================================');
   console.log('XServer 自动延期 (Cache 版)');
   console.log('==================================================');
-
-  if (!ACC || !ACC_PWD) { console.log('❌ 未找到账号或密码'); process.exit(1); }
-  checkScheduling();
+  console.log('🌐 网络模式: ' + proxyStatus);
 
   var launchOpts = { headless: true, channel: 'chrome' };
   
-  // 根据环境变量判断是否启用代理，指向 SOCKS5 端口
-  if (USE_PROXY) launchOpts.proxy = { server: 'socks5://127.0.0.1:1080' };
+  if (useProxy) {
+    launchOpts.proxy = { server: 'socks5://127.0.0.1:1080' };
+  }
   
   var browser = await chromium.launch(launchOpts);
   var context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   var page = await context.newPage();
 
   var thresholdHours = null;
+  var success = false;
 
   try {
-    if (USE_PROXY) {
+    if (useProxy) {
       console.log('🌐 检查代理 IP...');
       try {
         await page.goto('https://api.ipify.org/?format=json', { timeout: 15000 });
@@ -385,7 +387,8 @@ async function tryRenew(page, beforeMins, thresholdHours) {
         console.log('📅 预约 ' + extendInfo.nextDate + ' 再检查');
         await sendTGOnce('🧊', '冷却等待', '可续期: ' + extendInfo.nextDate + ' ' + (extendInfo.nextTime || ''));
         updateNextCheckDateByDate(extendInfo.nextDate, '冷却中');
-        process.exit(0);
+        success = true;
+        return success;
       }
 
       if (extendInfo.nextDate === getTodayStr() && extendInfo.nextMinutes !== null) {
@@ -404,7 +407,8 @@ async function tryRenew(page, beforeMins, thresholdHours) {
           console.log('🔭 剩余 ' + fmtHours(h) + ' > 阈值 ' + thresholdHours + 'h，预约 ' + days + ' 天后');
           await sendTGOnce('🔭', '探测跳过', '剩余 ' + fmtHours(h) + '，预约 ' + days + ' 天后查');
           updateNextCheckDate(days, '等待进入可续期窗口');
-          process.exit(0);
+          success = true;
+          return success;
         }
         console.log('⚠️ 剩余时间已达标但页面受限，尝试续期');
       } else {
@@ -419,13 +423,39 @@ async function tryRenew(page, beforeMins, thresholdHours) {
 
     console.log('🚀 执行续期');
     await tryRenew(page, totalMins, thresholdHours);
+    success = true;
 
   } catch (error) {
     console.log('❌ 流程失败: ' + error.message);
-    await page.screenshot({ path: 'failure.png' });
+    try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
     await sendTG('❌', '续签失败', error.message, 'failure.png');
+    throw error;
   } finally {
     await context.close();
     await browser.close();
+  }
+  return success;
+}
+
+(async function main() {
+  if (!ACC || !ACC_PWD) { console.log('❌ 未找到账号或密码'); process.exit(1); }
+  checkScheduling();
+
+  let useProxy = USE_PROXY;
+
+  try {
+    await runRenew(useProxy);
+  } catch (error) {
+    if (useProxy) {
+      console.log('\n⚠️ 代理模式失败，自动回退到直连模式重试...\n');
+      try {
+        await runRenew(false);
+      } catch (retryError) {
+        console.log('❌ 直连模式也失败: ' + retryError.message);
+        process.exit(1);
+      }
+    } else {
+      process.exit(1);
+    }
   }
 })();
