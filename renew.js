@@ -345,7 +345,7 @@ async function tryRenew(page, beforeMins, thresholdHours) {
     }
 
     console.log('🌐 打开登录页面');
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(LOGIN_URL, { waitUntil: 'load', timeout: 30000 });
     await page.screenshot({ path: '1_navigation.png' });
 
     console.log('📧 填写账号密码');
@@ -355,7 +355,7 @@ async function tryRenew(page, beforeMins, thresholdHours) {
 
     console.log('🖱️ 提交登录');
     await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+      page.waitForNavigation({ waitUntil: 'load', timeout: 30000 }),
       page.locator('input[name="action_user_login"]').click()
     ]);
     await page.screenshot({ path: '2_after_login.png' });
