@@ -8,6 +8,10 @@ const TG_TOKEN = process.env.TG_TOKEN;
 const TG_ID = process.env.TG_ID;
 const NODE_LINK = process.env.NODE_LINK;
 
+// 代理与网络状态环境引入
+const USE_PROXY = process.env.USE_PROXY === 'true';
+const PROXY_STATUS = process.env.PROXY_STATUS || '直连';
+
 // T 延迟控制（单位：分钟）
 const T = process.env.T;
 const IS_MANUAL = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' || !process.env.GITHUB_ACTIONS;
@@ -98,7 +102,10 @@ async function sendTGOnce(statusIcon, statusText, extra, imagePath) {
   try {
     var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
     var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    
+    // 追加代理网络状态
+    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + PROXY_STATUS + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    
     if (imagePath && fs.existsSync(imagePath)) {
       var fileData = fs.readFileSync(imagePath);
       var fd = new FormData();
@@ -131,7 +138,10 @@ async function sendTG(statusIcon, statusText, extra, imagePath) {
   try {
     var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
     var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    
+    // 追加代理网络状态
+    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + PROXY_STATUS + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    
     if (imagePath && fs.existsSync(imagePath)) {
       var fileData = fs.readFileSync(imagePath);
       var fd = new FormData();
@@ -315,7 +325,10 @@ async function tryRenew(page, beforeMins, thresholdHours) {
   checkScheduling();
 
   var launchOpts = { headless: true, channel: 'chrome' };
-  if (NODE_LINK) launchOpts.proxy = { server: 'http://127.0.0.1:1080' };
+  
+  // 根据环境变量判断是否启用代理，指向 SOCKS5 端口
+  if (USE_PROXY) launchOpts.proxy = { server: 'socks5://127.0.0.1:1080' };
+  
   var browser = await chromium.launch(launchOpts);
   var context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   var page = await context.newPage();
@@ -323,7 +336,7 @@ async function tryRenew(page, beforeMins, thresholdHours) {
   var thresholdHours = null;
 
   try {
-    if (NODE_LINK) {
+    if (USE_PROXY) {
       console.log('🌐 检查代理 IP...');
       try {
         await page.goto('https://api.ipify.org/?format=json', { timeout: 15000 });
