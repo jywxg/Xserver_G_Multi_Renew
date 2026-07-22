@@ -89,7 +89,7 @@ function fmtMinutes(min) {
 
 // ── Telegram 通知（带每日去重）──
 
-async function sendTGOnce(statusIcon, statusText, extra, imagePath) {
+async function sendTGOnce(statusIcon, statusText, extra, imagePath, proxyStatus) {
   if (!TG_TOKEN || !TG_ID) return;
   var today = getTodayStr();
   var s = getAccountStatus();
@@ -99,12 +99,12 @@ async function sendTGOnce(statusIcon, statusText, extra, imagePath) {
   }
   extra = extra || '';
   imagePath = imagePath || null;
+  proxyStatus = proxyStatus || PROXY_STATUS;
   try {
     var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
     var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
     
-    // 追加代理网络状态
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + PROXY_STATUS + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + proxyStatus + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
     
     if (imagePath && fs.existsSync(imagePath)) {
       var fileData = fs.readFileSync(imagePath);
@@ -131,16 +131,16 @@ async function sendTGOnce(statusIcon, statusText, extra, imagePath) {
   } catch (e) { console.log('⚠️ TG 发送失败:', e.message); }
 }
 
-async function sendTG(statusIcon, statusText, extra, imagePath) {
+async function sendTG(statusIcon, statusText, extra, imagePath, proxyStatus) {
   if (!TG_TOKEN || !TG_ID) return;
   extra = extra || '';
   imagePath = imagePath || null;
+  proxyStatus = proxyStatus || PROXY_STATUS;
   try {
     var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
     var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
     
-    // 追加代理网络状态
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + PROXY_STATUS + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + proxyStatus + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
     
     if (imagePath && fs.existsSync(imagePath)) {
       var fileData = fs.readFileSync(imagePath);
@@ -198,13 +198,13 @@ function updateNextCheckDateByDate(dateStr, reason) {
   console.log('📅 下次预约: ' + dateStr + '（' + reason + '）');
 }
 
-async function setTodayAndExit(msg) {
+async function setTodayAndExit(msg, proxyStatus) {
   console.log('🔄 ' + msg + '，设今天为预约日继续轮询');
   var status = loadStatus();
   if (!status[ACC]) status[ACC] = {};
   status[ACC].nextCheckDate = getTodayStr();
   saveStatus(status);
-  await sendTGOnce('🧊', '等待可续期', msg);
+  await sendTGOnce('🧊', '等待可续期', msg, null, proxyStatus);
   process.exit(0);
 }
 
@@ -257,7 +257,7 @@ async function parseExtendPage(page) {
 
 // ── 续期操作 ──
 
-async function tryRenew(page, beforeMins, thresholdHours) {
+async function tryRenew(page, beforeMins, thresholdHours, proxyStatus) {
   try {
     console.log('🔄 滚动到页面底部...');
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
@@ -304,13 +304,13 @@ async function tryRenew(page, beforeMins, thresholdHours) {
     status[ACC].lastSuccess = Date.now();
     saveStatus(status);
     updateNextCheckDate(nextDays, '续签成功');
-    await sendTG('✅', '续签成功', timeInfo + '\n下次检查' + nextDays + '天后', 'success.png');
+    await sendTG('✅', '续签成功', timeInfo + '\n下次检查' + nextDays + '天后', 'success.png', proxyStatus);
   } catch (e) {
     console.log('⚠️ 未找到延期按钮');
     await page.screenshot({ path: 'skip.png' });
     var s = getAccountStatus();
-    if (!s.lastSuccess) await sendTG('🕐', '等待中', '按钮未出现', 'skip.png');
-    else await sendTG('⚠️', '跳过', '未到时间', 'skip.png');
+    if (!s.lastSuccess) await sendTG('🕐', '等待中', '按钮未出现', 'skip.png', proxyStatus);
+    else await sendTG('⚠️', '跳过', '未到时间', 'skip.png', proxyStatus);
   }
 }
 
@@ -385,7 +385,7 @@ async function runRenew(useProxy) {
 
       if (extendInfo.nextDate && extendInfo.nextDate > getTodayStr()) {
         console.log('📅 预约 ' + extendInfo.nextDate + ' 再检查');
-        await sendTGOnce('🧊', '冷却等待', '可续期: ' + extendInfo.nextDate + ' ' + (extendInfo.nextTime || ''));
+        await sendTGOnce('🧊', '冷却等待', '可续期: ' + extendInfo.nextDate + ' ' + (extendInfo.nextTime || ''), null, proxyStatus);
         updateNextCheckDateByDate(extendInfo.nextDate, '冷却中');
         success = true;
         return success;
@@ -395,7 +395,7 @@ async function runRenew(useProxy) {
         var nowMin = getNowJSTMinutes();
         var waitMin = extendInfo.nextMinutes - nowMin;
         if (waitMin > 0) {
-          await setTodayAndExit('还需 ' + fmtMinutes(waitMin) + ' 后可续期');
+          await setTodayAndExit('还需 ' + fmtMinutes(waitMin) + ' 后可续期', proxyStatus);
         }
       }
 
@@ -405,7 +405,7 @@ async function runRenew(useProxy) {
           var hoursToGo = h - thresholdHours;
           var days = Math.max(1, Math.ceil(hoursToGo / 24));
           console.log('🔭 剩余 ' + fmtHours(h) + ' > 阈值 ' + thresholdHours + 'h，预约 ' + days + ' 天后');
-          await sendTGOnce('🔭', '探测跳过', '剩余 ' + fmtHours(h) + '，预约 ' + days + ' 天后查');
+          await sendTGOnce('🔭', '探测跳过', '剩余 ' + fmtHours(h) + '，预约 ' + days + ' 天后查', null, proxyStatus);
           updateNextCheckDate(days, '等待进入可续期窗口');
           success = true;
           return success;
@@ -422,13 +422,13 @@ async function runRenew(useProxy) {
     }
 
     console.log('🚀 执行续期');
-    await tryRenew(page, totalMins, thresholdHours);
+    await tryRenew(page, totalMins, thresholdHours, proxyStatus);
     success = true;
 
   } catch (error) {
     console.log('❌ 流程失败: ' + error.message);
     try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
-    await sendTG('❌', '续签失败', error.message, 'failure.png');
+    await sendTG('❌', '续签失败', error.message, 'failure.png', proxyStatus);
     throw error;
   } finally {
     await context.close();
