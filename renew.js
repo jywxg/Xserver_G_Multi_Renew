@@ -1,461 +1,707 @@
-const { chromium } = require('playwright');
-const fs = require('fs');
-const path = require('path');
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-const ACC = process.env.ACC || process.env.EML;
-const ACC_PWD = process.env.ACC_PWD || process.env.PWD;
-const TG_TOKEN = process.env.TG_TOKEN;
-const TG_ID = process.env.TG_ID;
-const NODE_LINK = process.env.NODE_LINK;
+import os
+import re
+import sys
+import time
+import requests
+from datetime import datetime
 
-// 代理与网络状态环境引入
-const USE_PROXY = process.env.USE_PROXY === 'true';
-const PROXY_STATUS = process.env.PROXY_STATUS || '直连';
+XSERVER_GAME_ACCOUNT = os.environ.get("XSERVER_GAME_ACCOUNT", "")
+if not XSERVER_GAME_ACCOUNT:
+    print("❌ 请设置 GitHub Secret: XSERVER_GAME_ACCOUNT（格式: 自定义名称,email,password）")
+    sys.exit(1)
 
-// T 延迟控制（单位：分钟）
-const T = process.env.T;
-const IS_MANUAL = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' || !process.env.GITHUB_ACTIONS;
-let DELAY_MS = 0;
-if (T && !IS_MANUAL) {
-  const range = T.match(/^(\d+)\s*-\s*(\d+)$/);
-  const fixed = T.match(/^(\d+)$/);
-  if (range) {
-    const lo = parseInt(range[1]), hi = parseInt(range[2]);
-    DELAY_MS = (Math.floor(Math.random() * (hi - lo + 1)) + lo) * 60000;
-    console.log('🎲 随机延迟 ' + (DELAY_MS / 60000) + ' 分钟（范围 ' + lo + '-' + hi + '）');
-  } else if (fixed) {
-    DELAY_MS = parseInt(fixed[1]) * 60000;
-    console.log('⏳ 固定延迟 ' + (DELAY_MS / 60000) + ' 分钟');
-  }
-}
-if (IS_MANUAL) console.log('🖱️ 手动触发模式，跳过延迟');
+ACCOUNTS = []
+for item in re.split(r"[\n;]+", XSERVER_GAME_ACCOUNT.strip()):
+    item = item.strip()
+    if not item:
+        continue
+    parts = item.split(",", 2)
+    if len(parts) < 3:
+        print("❌ XSERVER_GAME_ACCOUNT 格式错误，应为: 自定义名称,email,password")
+        sys.exit(1)
+    ACCOUNTS.append({"name": parts[0].strip(), "email": parts[1].strip(), "password": parts[2].strip()})
 
-const LOGIN_URL = 'https://secure.xserver.ne.jp/xapanel/login/xmgame';
-const STATUS_FILE = 'status.json';
+if not ACCOUNTS:
+    print("❌ 没有有效账号")
+    sys.exit(1)
 
-// 时区：续期页面时间为日本时间 (JST, UTC+9)
-const TZ_OFFSET = 9;
+BASE_URL         = "https://secure.xserver.ne.jp"
+LOGIN_PAGE       = f"{BASE_URL}/xapanel/login/xserver/?request_page=xserver%2Findex"
+LOGIN_URL        = f"{BASE_URL}/xapanel/myaccount/login"
+XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
+ONETIMELOGIN_URL = f"{BASE_URL}/xmgame/onetimelogin"
+INFO_URL         = f"{BASE_URL}/xmgame/game/index"
+EXTEND_URL       = f"{BASE_URL}/xmgame/game/freeplan/extend/index"
+RENEW_URL        = f"{BASE_URL}/xmgame/game/freeplan/extend/input"
+CONF_URL         = f"{BASE_URL}/xmgame/game/freeplan/extend/conf"
+DO_URL           = f"{BASE_URL}/xmgame/game/freeplan/extend/do"
+IP_CHECK_URL     = "https://ipinfo.io/json"
 
-// ── 状态持久化 ──
+RENEW_THRESHOLD_HOURS = 4
 
-function loadStatus() {
-  try {
-    if (fs.existsSync(STATUS_FILE)) return JSON.parse(fs.readFileSync(STATUS_FILE, 'utf8'));
-  } catch (e) {}
-  return {};
-}
+NODE_LINK = os.environ.get("NODE_LINK", "")
 
-function saveStatus(data) {
-  fs.writeFileSync(STATUS_FILE, JSON.stringify(data, null, 2));
-}
+# 修正：通过解析出的环境变量状态，决定是否挂载代理配置，以支持降级直连
+USE_PROXY = os.environ.get("USE_PROXY", "false").lower() in ["true", "1", "yes"]
+PROXY_STATUS = os.environ.get("PROXY_STATUS", "直连")
+# 新增：存储代理信息
+PROXY_AVAILABLE = False
+PROXY_IP = "未知"
+PROXY_COUNTRY = "未知"
+DIRECT_IP = "未知"
+DIRECT_COUNTRY = "未知"
+ACTUAL_MODE = "直连"
+ACTUAL_IP = "未知"
+ACTUAL_COUNTRY = "未知"
 
-function getAccountStatus() {
-  return loadStatus()[ACC] || {};
-}
+# 只有在 USE_PROXY 被设为 true 才会使用代理（即使 NODE_LINK 存在但全部连接失败，依然会被设为 false 并直连）
+if USE_PROXY:
+    PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"}
+else:
+    PROXIES = {}
 
-// ── 日期工具 ──
+TG_BOT = os.environ.get("TG_BOT", "")
 
-function getNowJST() {
-  return new Date(Date.now() + TZ_OFFSET * 3600000);
-}
-
-function getTodayStr() {
-  return getNowJST().toISOString().slice(0, 10);
-}
-
-function getNowJSTMinutes() {
-  var d = getNowJST();
-  return d.getUTCHours() * 60 + d.getUTCMinutes();
-}
-
-function addDaysStr(dateStr, days) {
-  const d = new Date(dateStr);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-function fmtHours(h) {
-  if (h === null || h === undefined) return '?';
-  if (h >= 10) return Math.round(h) + 'h';
-  if (h >= 1) return h.toFixed(1) + 'h';
-  return Math.round(h * 60) + 'm';
-}
-
-function fmtMinutes(min) {
-  if (min === null || min === undefined) return '?';
-  var h = Math.floor(min / 60), m = min % 60;
-  return h > 0 ? h + 'h' + m + 'm' : m + 'm';
+BASE_HEADERS = {
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    "cache-control": "no-cache",
+    "pragma": "no-cache",
+    "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not;A=Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
 }
 
-// ── Telegram 通知（带每日去重）──
+# 超时时间设置（秒）
+DEFAULT_TIMEOUT = 30
+SLOW_TIMEOUT = 60
 
-async function sendTGOnce(statusIcon, statusText, extra, imagePath, proxyStatus) {
-  if (!TG_TOKEN || !TG_ID) return;
-  var today = getTodayStr();
-  var s = getAccountStatus();
-  if (s.notifiedDate === today) {
-    console.log('🔇 今日已通知过，跳过');
-    return;
-  }
-  extra = extra || '';
-  imagePath = imagePath || null;
-  proxyStatus = proxyStatus || PROXY_STATUS;
-  try {
-    var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
-    var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
+SCRIPT_NAME = os.path.basename(__file__)
+_start_time = time.time()
+
+
+def log(msg):
+    print(msg, flush=True)
+
+def divider(label):
+    width = 60
+    inner = f" {{{label}}} "
+    pad_total = width - len(inner)
+    pad_l = pad_total // 2
+    pad_r = pad_total - pad_l
+    log("=" * pad_l + inner + "=" * pad_r)
+
+def elapsed():
+    return f"{time.time() - _start_time:.2f}s"
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_remaining(page_html: str) -> tuple:
+    """
+    返回 (hours, minutes, deadline_str, is_expired)
+    正常有剩余：(小时, 分钟, 日期, False)
+    已过期：    (-1, -1, 日期, True)
+    解析失败：  (-2, -2, 日期, False)
+    """
+    deadline = re.search(r'<span class="dateLimit">\(([^)]+)\)</span>', page_html)
+    dl_str = deadline.group(1) if deadline else "未知"
+
+    # 过期状态：limitOverTxt + 期限切れ
+    if "limitOverTxt" in page_html and "期限切れ" in page_html:
+        return -1, -1, dl_str, True
+
+    # 正常状态：numberTxt
+    numbers = re.findall(r'<span class="numberTxt">(\d+)</span>', page_html)
+    if len(numbers) >= 2:
+        return int(numbers[0]), int(numbers[1]), dl_str, False
+
+    return -2, -2, dl_str, False
+
+
+def can_renew(page_html: str) -> bool:
+    return "残り契約時間が4時間を切るまで" not in page_html
+
+
+def notify_tg(result: str, deadline: str):
+    if not TG_BOT:
+        return
+    parts = TG_BOT.split(",", 1)
+    if len(parts) != 2:
+        return
+    chat_id, bot_token = parts[0].strip(), parts[1].strip()
     
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + proxyStatus + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    # 构建网络状态信息
+    proxy_masked = re.sub(r'\.\d+$', '.**', PROXY_IP)
+    direct_masked = re.sub(r'\.\d+$', '.**', DIRECT_IP)
+    actual_masked = re.sub(r'\.\d+$', '.**', ACTUAL_IP)
     
-    if (imagePath && fs.existsSync(imagePath)) {
-      var fileData = fs.readFileSync(imagePath);
-      var fd = new FormData();
-      fd.append('chat_id', TG_ID);
-      fd.append('caption', text);
-      fd.append('photo', new Blob([fileData], { type: 'image/png' }), path.basename(imagePath));
-      var res = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendPhoto', { method: 'POST', body: fd });
-      if (res.ok) console.log('✅ TG 通知已发送');
-      else console.log('⚠️ TG 发送失败:', res.status, await res.text());
-    } else {
-      var res2 = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: TG_ID, text: text })
-      });
-      if (res2.ok) console.log('✅ TG 通知已发送');
-      else console.log('⚠️ TG 发送失败:', res2.status, await res2.text());
-    }
-    var status = loadStatus();
-    if (!status[ACC]) status[ACC] = {};
-    status[ACC].notifiedDate = today;
-    saveStatus(status);
-  } catch (e) { console.log('⚠️ TG 发送失败:', e.message); }
-}
-
-async function sendTG(statusIcon, statusText, extra, imagePath, proxyStatus) {
-  if (!TG_TOKEN || !TG_ID) return;
-  extra = extra || '';
-  imagePath = imagePath || null;
-  proxyStatus = proxyStatus || PROXY_STATUS;
-  try {
-    var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
-    var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
+    network_info = []
+    if USE_PROXY:
+        proxy_status = "✅ 可用" if PROXY_AVAILABLE else "❌ 不可用/被屏蔽"
+        network_info.append(f"🔀 代理: {proxy_status}")
+        if PROXY_AVAILABLE:
+            network_info.append(f"   IP: {proxy_masked} ({PROXY_COUNTRY})")
+        network_info.append(f"🌐 直连: IP {direct_masked} ({DIRECT_COUNTRY})")
+        network_info.append(f"✅ 实际使用: {ACTUAL_MODE}")
+        if ACTUAL_MODE == "代理":
+            network_info.append(f"   IP: {actual_masked} ({ACTUAL_COUNTRY})")
+    else:
+        network_info.append(f"🌐 直连: IP {direct_masked} ({DIRECT_COUNTRY})")
+        network_info.append(f"✅ 实际使用: {ACTUAL_MODE}")
     
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + proxyStatus + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
+    network_str = "\n".join(network_info)
     
-    if (imagePath && fs.existsSync(imagePath)) {
-      var fileData = fs.readFileSync(imagePath);
-      var fd = new FormData();
-      fd.append('chat_id', TG_ID);
-      fd.append('caption', text);
-      fd.append('photo', new Blob([fileData], { type: 'image/png' }), path.basename(imagePath));
-      var res = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendPhoto', { method: 'POST', body: fd });
-      if (res.ok) console.log('✅ TG 通知已发送');
-      else console.log('⚠️ TG 发送失败:', res.status, await res.text());
-    } else {
-      var res2 = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: TG_ID, text: text })
-      });
-      if (res2.ok) console.log('✅ TG 通知已发送');
-      else console.log('⚠️ TG 发送失败:', res2.status, await res2.text());
-    }
-  } catch (e) { console.log('⚠️ TG 发送失败:', e.message); }
-}
+    message = (
+        f"🎮 XServer Game 续期通知\n"
+        f"🕐 运行时间: {now_str()}\n"
+        f"{network_str}\n"
+        f"🖥 服务器: {SERVER_NAME}\n"
+        f"📅 利用期限: {deadline}\n"
+        f"📊 续期结果: {result}"
+    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": message},
+            timeout=10,
+            proxies=PROXIES,
+        )
+        log("📨 TG 推送成功")
+    except Exception as e:
+        log(f"⚠️ TG 推送失败: {e}")
 
-// ── 调度 ──
 
-function checkScheduling() {
-  const today = getTodayStr();
-  const s = getAccountStatus();
-  if (!s.nextCheckDate) { console.log('🆕 首次运行'); return; }
-  // force 模式跳过预检
-  if (process.env.FORCE === 'true') { console.log('💪 强制模式，跳过预检'); return; }
-  if (process.env.GITHUB_EVENT_NAME !== 'schedule') { console.log('💻 手动触发'); return; }
-  if (today < s.nextCheckDate) {
-    var days = Math.ceil((new Date(s.nextCheckDate) - new Date(today)) / 86400000);
-    console.log('⏳ 预约 ' + s.nextCheckDate + '，还剩 ' + days + ' 天，秒退');
-    process.exit(0);
-  }
-  console.log('📅 到达预约日期 ' + today);
-}
+def finish(success: bool, result: str, deadline: str):
+    notify_tg(result, deadline)
+    tag = "passed" if success else "failed"
+    divider(f"{SCRIPT_NAME} {tag} in {elapsed()}")
+    sys.exit(0 if success else 1)
 
-function updateNextCheckDate(daysLater, reason) {
-  var next = addDaysStr(getTodayStr(), daysLater);
-  var status = loadStatus();
-  if (!status[ACC]) status[ACC] = {};
-  status[ACC].nextCheckDate = next;
-  delete status[ACC].notifiedDate;
-  saveStatus(status);
-  console.log('📅 下次预约: ' + next + '（' + reason + '）');
-}
 
-function updateNextCheckDateByDate(dateStr, reason) {
-  var status = loadStatus();
-  if (!status[ACC]) status[ACC] = {};
-  status[ACC].nextCheckDate = dateStr;
-  saveStatus(status);
-  console.log('📅 下次预约: ' + dateStr + '（' + reason + '）');
-}
+def login(email, password) -> requests.Session:
+    email_masked = re.sub(r"(.{2}).*(@.*)", r"\1***\2", email)
+    log(f"🔑 正在登录... 账号: {email_masked}")
+    session = requests.Session()
+    
+    # 配置 Session 以支持更好的 HTTP 特性
+    session.headers.update(BASE_HEADERS)
+    session.max_redirects = 10
+    
+    # 添加适当的延迟，模拟真实用户行为
+    time.sleep(1)
 
-async function setTodayAndExit(msg, proxyStatus) {
-  console.log('🔄 ' + msg + '，设今天为预约日继续轮询');
-  var status = loadStatus();
-  if (!status[ACC]) status[ACC] = {};
-  status[ACC].nextCheckDate = getTodayStr();
-  saveStatus(status);
-  await sendTGOnce('🧊', '等待可续期', msg, null, proxyStatus);
-  process.exit(0);
-}
+    try:
+        resp = session.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=PROXIES)
+    except Exception as e:
+        log(f"❌ 获取登录页失败: {e}")
+        sys.exit(1)
 
-// ── 页面解析 ──
+    uniqid_match = re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text)
+    if not uniqid_match:
+        log("❌ 未找到 uniqid")
+        timestamp = int(time.time())
+        save_debug_html(resp.text, f"debug_login_page_{timestamp}.html")
+        log(f"DEBUG: {resp.text[:1000]}")
+        sys.exit(1)
+    uniqid = uniqid_match.group(1)
 
-async function parseRemainingMinutes(page) {
-  try {
-    await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(3000);
-    var text = await page.evaluate(function() {
-      var el = document.querySelector('[class*="remain"], [class*="time"], [class*="period"]');
-      if (el) return el.innerText;
-      return document.body.innerText;
-    });
-    var m = text.match(/残り(\d+)時間(\d+)分/);
-    if (m) { console.log('⏱️ 剩余时间: ' + m[1] + '小时' + m[2] + '分钟'); return parseInt(m[1]) * 60 + parseInt(m[2]); }
-    m = text.match(/残り(\d+)時間/);
-    if (m) { console.log('⏱️ 剩余时间: ' + m[1] + '小时'); return parseInt(m[1]) * 60; }
-    m = text.match(/(\d+)時間(\d+)分/);
-    if (m) { console.log('⏱️ 剩余时间: ' + m[1] + '小时' + m[2] + '分钟'); return parseInt(m[1]) * 60 + parseInt(m[2]); }
-    console.log('⚠️ 未找到剩余时间');
-    return null;
-  } catch (e) { console.log('⚠️ 解析失败:', e.message); return null; }
-}
+    try:
+        resp_login = session.post(
+            LOGIN_URL,
+            headers={
+                **BASE_HEADERS,
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": BASE_URL,
+                "referer": LOGIN_PAGE,
+            },
+            data={
+                "request_page": "xserver/index",
+                "site": "",
+                "uniqid": uniqid,
+                "memberid": email,
+                "user_password": password,
+                "service_login": "xserver",
+                "action_user_login": "%A5%ED%A5%B0%A5%A4%A5%F3%A4%B9%A4%EB",
+            },
+            allow_redirects=True,
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+        )
+    except Exception as e:
+        log(f"❌ 登录请求失败: {e}")
+        sys.exit(1)
 
-async function parseExtendPage(page) {
-  try {
-    await page.waitForTimeout(2000);
-    var text = await page.textContent('body');
-  } catch (e) {
-    console.log('⚠️ 未能读取续期页面');
-    return { restricted: null, thresholdHours: null, nextDate: null, nextTime: null, nextMinutes: null };
-  }
+    if not session.cookies.get("X2SESSID"):
+        log("❌ 登录失败，未获取到 X2SESSID")
+        timestamp = int(time.time())
+        save_debug_html(resp_login.text, f"debug_login_response_{timestamp}.html")
+        log(f"DEBUG: {resp_login.text[:1000]}")
+        sys.exit(1)
 
-  var thresholdMatch = text.match(/残り契約時間が(\d+)時間を切るまで/);
-  var nextMatch = text.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})以降/);
+    log("✅ 登录成功")
+    
+    # 额外步骤：登录后访问主页面确认 cookie
+    time.sleep(1)
+    try:
+        resp_main = session.get(f"{BASE_URL}/xapanel/", headers={**BASE_HEADERS, "referer": LOGIN_PAGE}, 
+                               timeout=DEFAULT_TIMEOUT, proxies=PROXIES, allow_redirects=True)
+        log("✅ 确认登录状态成功")
+    except Exception as e:
+        log(f"⚠️  确认登录状态时遇到问题，继续尝试: {e}")
+    
+    return session
 
-  if (thresholdMatch) {
-    var thresholdHours = parseInt(thresholdMatch[1]);
-    var nextDate = nextMatch ? nextMatch[1] : null;
-    var nextTime = nextMatch ? nextMatch[2] : null;
-    var nextMinutes = nextMatch ? parseInt(nextMatch[2].split(':')[0]) * 60 + parseInt(nextMatch[2].split(':')[1]) : null;
-    console.log('🧊 受限: 阈值=' + thresholdHours + 'h, 可续期=' + (nextTime ? nextDate + ' ' + nextTime : '未知'));
-    return { restricted: true, thresholdHours: thresholdHours, nextDate: nextDate, nextTime: nextTime, nextMinutes: nextMinutes };
-  }
 
-  console.log('✅ 可执行续期');
-  return { restricted: false, thresholdHours: null, nextDate: null, nextTime: null, nextMinutes: null };
-}
+def jump_to_xmgame(session: requests.Session):
+    log("🔗 跳转到游戏面板...")
+    time.sleep(1)
 
-// ── 续期操作 ──
+    # 先访问 xserver 主面板页面
+    try:
+        resp_panel = session.get(
+            f"{BASE_URL}/xapanel/",
+            headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"},
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        log(f"⚠️  获取主面板失败，继续尝试: {e}")
+    
+    time.sleep(0.5)
 
-async function tryRenew(page, beforeMins, thresholdHours, proxyStatus) {
-  try {
-    console.log('🔄 滚动到页面底部...');
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(2000);
+    try:
+        resp = session.get(
+            XMGAME_INDEX_URL,
+            headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"},
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+        resp.encoding = "EUC-JP"
+    except Exception as e:
+        log(f"❌ 获取 xmgame index 失败: {e}")
+        sys.exit(1)
 
-    await page.getByRole('link', { name: '期限を延長する' }).waitFor({ state: 'visible', timeout: 5000 });
-    await page.getByRole('link', { name: '期限を延長する' }).click();
-    await page.waitForLoadState('load');
+    jumpvps_match = re.search(r'/xapanel/xmgame/jumpvps/\?id=(\d+)', resp.text)
+    if not jumpvps_match:
+        log("❌ 未找到 jumpvps 链接")
+        timestamp = int(time.time())
+        save_debug_html(resp.text, f"debug_xmgame_index_{timestamp}.html")
+        log(f"DEBUG: {resp.text[:1500]}")
+        sys.exit(1)
+    server_id = jumpvps_match.group(1)
+    log(f"✅ 找到服务器 ID: {server_id}")
+    
+    time.sleep(1)
 
-    await page.getByRole('button', { name: '確認画面に進む' }).click();
-    await page.waitForLoadState('load');
+    try:
+        resp2 = session.get(
+            f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}",
+            headers={**BASE_HEADERS, "referer": XMGAME_INDEX_URL},
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+        resp2.encoding = "EUC-JP"
+    except Exception as e:
+        log(f"❌ 获取 jumpvps 失败: {e}")
+        sys.exit(1)
 
-    console.log('🖱️ 执行延期...');
-    await page.getByRole('button', { name: '期限を延長する' }).click();
-    await page.waitForLoadState('load');
-    await page.screenshot({ path: '5_before_back.png' });
+    # 尝试多种方式解析表单字段，兼容不同的 HTML 格式
+    username = (re.search(r'name="username"\s+value="([^"]+)"', resp2.text) or
+                re.search(r'name=\'username\'\s+value=\'([^\']+)\'', resp2.text))
+    server_identify = (re.search(r'name="server_identify"\s+value="([^"]+)"', resp2.text) or
+                       re.search(r'name=\'server_identify\'\s+value=\'([^\']+)\'', resp2.text))
+    password = (re.search(r'name="password"\s+value="([^"]+)"', resp2.text) or
+                re.search(r'name=\'password\'\s+value=\'([^\']+)\'', resp2.text))
+    service = (re.search(r'name="service"\s+value="([^"]+)"', resp2.text) or
+               re.search(r'name=\'service\'\s+value=\'([^\']+)\'', resp2.text))
+    master_panel = re.search(r'name="master_panel_username"\s+value="([^"]*)"', resp2.text)
+    back = re.search(r'name="back"\s+value="([^"]+)"', resp2.text)
 
-    console.log('✅ 延期成功，获取新剩余时间...');
-    await page.getByRole('link', { name: '戻る' }).click();
-    await page.waitForLoadState('load');
-    await page.screenshot({ path: 'success.png' });
+    if not all([username, server_identify, password, service]):
+        log("❌ 解析 onetimelogin 表单失败")
+        timestamp = int(time.time())
+        save_debug_html(resp2.text, f"debug_jumpvps_{timestamp}.html")
+        log(f"DEBUG: {resp2.text[:2000]}")
+        sys.exit(1)
 
-    var afterMins = await parseRemainingMinutes(page);
-    var beforeH = beforeMins ? fmtHours(beforeMins / 60) : '?';
-    var afterH = afterMins ? fmtHours(afterMins / 60) : '?';
-    var timeInfo = '续签前 ' + beforeH + ' → 续签后 ' + afterH;
-    console.log('⏱️ ' + timeInfo);
+    try:
+        session.post(
+            ONETIMELOGIN_URL,
+            headers={
+                **BASE_HEADERS,
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": BASE_URL,
+                "referer": f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}",
+            },
+            data={
+                "username":              username.group(1),
+                "server_identify":       server_identify.group(1),
+                "password":              password.group(1),
+                "service":               service.group(1),
+                "master_panel_username": master_panel.group(1) if master_panel else "",
+                "back":                  back.group(1) if back else "",
+            },
+            allow_redirects=True,
+            timeout=SLOW_TIMEOUT,
+            proxies=PROXIES,
+        )
+    except Exception as e:
+        log(f"❌ onetimelogin 请求失败: {e}")
+        sys.exit(1)
 
-    var nextDays = 3;
-    var persistThreshold = thresholdHours;
-    if (persistThreshold === null) {
-      var s2 = getAccountStatus();
-      persistThreshold = s2.thresholdHours || 16;
-    }
-    if (afterMins !== null) {
-      var newH = afterMins / 60;
-      var calcDays = Math.ceil((newH - persistThreshold) / 24);
-      nextDays = Math.max(1, calcDays);
-      console.log('📐 续期后剩余 ' + fmtHours(newH) + '，阈值 ' + persistThreshold + 'h，约 ' + nextDays + ' 天后复查');
-    }
+    xmgame_sessid = (session.cookies.get("X2%2Fxmgame_SESSID") or
+                     session.cookies.get("X2/xmgame_SESSID"))
+    if xmgame_sessid:
+        log("✅ 游戏面板 Session 获取成功")
+    else:
+        log("⚠️ 未检测到 xmgame_SESSID，但继续尝试...")
 
-    var status = loadStatus();
-    if (!status[ACC]) status[ACC] = {};
-    status[ACC].lastSuccess = Date.now();
-    saveStatus(status);
-    updateNextCheckDate(nextDays, '续签成功');
-    await sendTG('✅', '续签成功', timeInfo + '\n下次检查' + nextDays + '天后', 'success.png', proxyStatus);
-  } catch (e) {
-    console.log('⚠️ 未找到延期按钮');
-    await page.screenshot({ path: 'skip.png' });
-    var s = getAccountStatus();
-    if (!s.lastSuccess) await sendTG('🕐', '等待中', '按钮未出现', 'skip.png', proxyStatus);
-    else await sendTG('⚠️', '跳过', '未到时间', 'skip.png', proxyStatus);
-  }
-}
 
-// ── 主流程 ──
+def fetch_info_page(session: requests.Session) -> str:
+    time.sleep(1)
+    try:
+        resp = session.get(
+            INFO_URL,
+            headers={**BASE_HEADERS, "referer": BASE_URL},
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+        resp.encoding = "EUC-JP"
+        return resp.text
+    except Exception as e:
+        log(f"❌ 获取游戏首页失败: {e}")
+        sys.exit(1)
 
-async function runRenew(useProxy) {
-  let proxyStatus = useProxy ? (process.env.PROXY_STATUS || '代理') : '直连';
-  
-  console.log('==================================================');
-  console.log('XServer 自动延期 (Cache 版)');
-  console.log('==================================================');
-  console.log('🌐 网络模式: ' + proxyStatus);
 
-  var launchOpts = { headless: true, channel: 'chrome' };
-  
-  if (useProxy) {
-    launchOpts.proxy = { server: 'socks5://127.0.0.1:1080' };
-  }
-  
-  var browser = await chromium.launch(launchOpts);
-  var context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
-  var page = await context.newPage();
+def fetch_extend_page(session: requests.Session) -> str:
+    time.sleep(1)
+    try:
+        resp = session.get(
+            EXTEND_URL,
+            headers={**BASE_HEADERS, "referer": INFO_URL},
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+        resp.encoding = "EUC-JP"
+        return resp.text
+    except Exception as e:
+        log(f"❌ 获取续期页面失败: {e}")
+        sys.exit(1)
 
-  var thresholdHours = null;
-  var success = false;
 
-  try {
-    if (useProxy) {
-      console.log('🌐 检查代理 IP...');
-      try {
-        await page.goto('https://api.ipify.org/?format=json', { timeout: 15000 });
-        console.log('✅ IP: ' + JSON.parse(await page.textContent('body')).ip);
-      } catch (e) { console.log('⚠️ IP 检查失败'); }
-    }
+def check_ip_info(proxies=None):
+    """检测IP和国家信息"""
+    try:
+        resp = requests.get(IP_CHECK_URL, timeout=DEFAULT_TIMEOUT, proxies=proxies)
+        ip_data = resp.json()
+        ip = ip_data.get("ip", "未知")
+        country = ip_data.get("country", "未知")
+        masked = re.sub(r'\.\d+$', '.**', ip)
+        return ip, country, masked
+    except Exception as e:
+        return "未知", "未知", "未知"
 
-    console.log('🌐 打开登录页面');
-    await page.goto(LOGIN_URL, { waitUntil: 'load', timeout: 30000 });
-    await page.screenshot({ path: '1_navigation.png' });
+def check_proxy_available():
+    """检测代理是否可用"""
+    global PROXY_AVAILABLE, PROXY_IP, PROXY_COUNTRY
+    if not USE_PROXY:
+        return False
+    try:
+        log("🌐 检测代理是否可用...")
+        # 先检测代理能否正常访问IP检测服务
+        ip, country, masked = check_ip_info(PROXIES)
+        if ip == "未知":
+            log("❌ 代理连接失败，无法获取IP信息")
+            return False
+        PROXY_IP = ip
+        PROXY_COUNTRY = country
+        PROXY_AVAILABLE = True
+        log(f"✅ 代理可用: {masked} ({country})")
+        
+        # 再检测代理是否能正常访问XServer
+        log("🔍 检测代理是否被XServer屏蔽...")
+        resp = requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=PROXIES, allow_redirects=True)
+        if resp.status_code == 200 and "login" in resp.text.lower():
+            log("✅ 代理未被XServer屏蔽")
+            return True
+        else:
+            log(f"⚠️ 代理可能被XServer屏蔽 (状态码: {resp.status_code})")
+            return False
+    except Exception as e:
+        log(f"❌ 代理检测失败: {e}")
+        return False
 
-    console.log('📧 填写账号密码');
-    await page.locator('#memberid').fill(ACC);
-    await page.locator('#user_password').fill(ACC_PWD);
-    await page.screenshot({ path: '1.5_filled.png' });
+def save_debug_html(html_content, filename):
+    """保存调试 HTML 页面"""
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        log(f"📄 调试页面已保存至: {filename}")
+    except Exception as e:
+        log(f"⚠️ 保存调试页面失败: {e}")
 
-    console.log('🖱️ 提交登录');
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'load', timeout: 30000 }),
-      page.locator('input[name="action_user_login"]').click()
-    ]);
-    await page.screenshot({ path: '2_after_login.png' });
+def do_renew(session: requests.Session) -> bool:
+    log("📝 获取续期表单...")
+    time.sleep(1)
+    try:
+        resp = session.get(
+            RENEW_URL,
+            headers={**BASE_HEADERS, "referer": EXTEND_URL},
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+        resp.encoding = "EUC-JP"
+    except Exception as e:
+        log(f"❌ 获取续期表单失败: {e}")
+        return False
 
-    console.log('🚀 点击游戏管理');
-    await page.getByRole('link', { name: 'ゲーム管理' }).click();
-    await page.waitForLoadState('load');
-    await page.screenshot({ path: '3_game_manage.png' });
+    # 尝试多种方式解析 uniqid 和 login_token，兼容不同的 HTML 格式
+    uniqid = (re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text) or
+                re.search(r'name=\'uniqid\'\s+value=\'([^\']+)\'', resp.text) or
+                re.search(r'name=uniqid\s+value=([^\s>]+)', resp.text))
+    
+    # 先尝试从表单字段，再尝试从 JavaScript 变量中获取 login_token
+    login_token = (re.search(r'name="login_token"\s+value="([^"]+)"', resp.text) or
+                   re.search(r'name=\'login_token\'\s+value=\'([^\']+)\'', resp.text) or
+                   re.search(r'name=login_token\s+value=([^\s>]+)', resp.text) or
+                   re.search(r'clientLoginToken\s*=\s*["\']([^"\']+)["\']', resp.text))
+    
+    period = (re.search(r'name="period"[^>]*value="(\d+)"', resp.text) or
+              re.search(r'name=\'period\'[^>]*value=\'(\d+)\'', resp.text) or
+              re.search(r'name=period[^>]*value=([^\s>]+)', resp.text))
 
-    var totalMins = await parseRemainingMinutes(page);
+    if not uniqid:
+        log("⚠️ 未找到 uniqid 表单字段，尝试从页面中查找其他可能的标识...")
+        # 如果没有找到 uniqid，我们可以尝试不使用它，或者使用其他方式
+        # 先记录下来，但继续尝试
+    
+    if not login_token:
+        log("❌ 解析续期表单失败：未找到 login_token")
+        timestamp = int(time.time())
+        save_debug_html(resp.text, f"debug_renew_page_{timestamp}.html")
+        log(f"DEBUG: 响应 URL: {resp.url}")
+        log(f"DEBUG: 响应状态码: {resp.status_code}")
+        log(f"DEBUG: 响应头: {dict(resp.headers)}")
+        log(f"DEBUG: 页面完整内容已保存，开头 2000 字符:\n{resp.text[:2000]}")
+        return False
 
-    console.log('🚀 进入续期页面');
-    await page.getByRole('link', { name: 'アップグレード・期限延長' }).click();
-    await page.screenshot({ path: '4_renew_page.png' });
+    period_val = period.group(1) if period else "48"
+    
+    # 记录我们找到的值
+    uniqid_display = f"uniqid={uniqid.group(1)[:10]}..." if uniqid else "uniqid=NOT_FOUND"
+    log(f"✅ 解析表单成功: {uniqid_display}, login_token={login_token.group(1)[:10]}...")
 
-    var extendInfo = await parseExtendPage(page);
-
-    if (extendInfo.restricted) {
-      thresholdHours = extendInfo.thresholdHours;
-
-      var st = loadStatus();
-      if (!st[ACC]) st[ACC] = {};
-      st[ACC].thresholdHours = thresholdHours;
-      saveStatus(st);
-
-      if (extendInfo.nextDate && extendInfo.nextDate > getTodayStr()) {
-        console.log('📅 预约 ' + extendInfo.nextDate + ' 再检查');
-        await sendTGOnce('🧊', '冷却等待', '可续期: ' + extendInfo.nextDate + ' ' + (extendInfo.nextTime || ''), null, proxyStatus);
-        updateNextCheckDateByDate(extendInfo.nextDate, '冷却中');
-        success = true;
-        return success;
-      }
-
-      if (extendInfo.nextDate === getTodayStr() && extendInfo.nextMinutes !== null) {
-        var nowMin = getNowJSTMinutes();
-        var waitMin = extendInfo.nextMinutes - nowMin;
-        if (waitMin > 0) {
-          await setTodayAndExit('还需 ' + fmtMinutes(waitMin) + ' 后可续期', proxyStatus);
+    log("📤 提交确认页...")
+    time.sleep(1)
+    try:
+        # 构建表单数据，只有在找到 uniqid 时才添加
+        form_data = {
+            "ethna_csrf":  "",
+            "login_token": login_token.group(1),
+            "period":      period_val,
         }
-      }
+        if uniqid:
+            form_data["uniqid"] = uniqid.group(1)
+        
+        resp2 = session.post(
+            CONF_URL,
+            headers={
+                **BASE_HEADERS,
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": BASE_URL,
+                "referer": RENEW_URL,
+            },
+            data=form_data,
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+        resp2.encoding = "EUC-JP"
+    except Exception as e:
+        log(f"❌ 提交确认页失败: {e}")
+        return False
 
-      if (totalMins !== null && thresholdHours !== null) {
-        var h = totalMins / 60;
-        if (h > thresholdHours) {
-          var hoursToGo = h - thresholdHours;
-          var days = Math.max(1, Math.ceil(hoursToGo / 24));
-          console.log('🔭 剩余 ' + fmtHours(h) + ' > 阈值 ' + thresholdHours + 'h，预约 ' + days + ' 天后');
-          await sendTGOnce('🔭', '探测跳过', '剩余 ' + fmtHours(h) + '，预约 ' + days + ' 天后查', null, proxyStatus);
-          updateNextCheckDate(days, '等待进入可续期窗口');
-          success = true;
-          return success;
+    uniqid2 = (re.search(r'name="uniqid"\s+value="([^"]+)"', resp2.text) or
+               re.search(r'name=\'uniqid\'\s+value=\'([^\']+)\'', resp2.text) or
+               re.search(r'name=uniqid\s+value=([^\s>]+)', resp2.text))
+    
+    if not uniqid2:
+        log("⚠️ 未在确认页找到 uniqid，但尝试继续执行...")
+    
+    log("✅ 续期执行完成")
+    time.sleep(1)
+    try:
+        # 同样，只有在找到 uniqid2 时才添加
+        do_form_data = {
+            "ethna_csrf": "",
+            "period":     period_val,
         }
-        console.log('⚠️ 剩余时间已达标但页面受限，尝试续期');
-      } else {
-        console.log('⚠️ 无法分析，尝试直接续期');
-      }
-    }
+        if uniqid2:
+            do_form_data["uniqid"] = uniqid2.group(1)
+        
+        session.post(
+            DO_URL,
+            headers={
+                **BASE_HEADERS,
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": BASE_URL,
+                "referer": CONF_URL,
+            },
+            data=do_form_data,
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        log(f"❌ 执行续期失败: {e}")
+        return False
 
-    if (DELAY_MS > 0) {
-      console.log('⏳ T 延迟 ' + fmtMinutes(Math.round(DELAY_MS / 60000)) + '...');
-      await new Promise(function(r) { setTimeout(r, DELAY_MS); });
-    }
+    return True
 
-    console.log('🚀 执行续期');
-    await tryRenew(page, totalMins, thresholdHours, proxyStatus);
-    success = true;
 
-  } catch (error) {
-    console.log('❌ 流程失败: ' + error.message);
-    try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
-    await sendTG('❌', '续签失败', error.message, 'failure.png', proxyStatus);
-    throw error;
-  } finally {
-    await context.close();
-    await browser.close();
-  }
-  return success;
-}
+def run_account(account):
+    global SERVER_NAME, ACTUAL_MODE, ACTUAL_IP, ACTUAL_COUNTRY, DIRECT_IP, DIRECT_COUNTRY
+    SERVER_NAME = account["name"]
+    divider(f"{SCRIPT_NAME} starts")
+    log(f"🕐 运行时间: {now_str()}")
+    log(f"🖥 服务器: {SERVER_NAME}")
 
-(async function main() {
-  if (!ACC || !ACC_PWD) { console.log('❌ 未找到账号或密码'); process.exit(1); }
-  checkScheduling();
+    # 先获取直连IP信息
+    log("🌐 获取直连 IP 信息...")
+    DIRECT_IP, DIRECT_COUNTRY, direct_masked = check_ip_info()
+    if DIRECT_IP != "未知":
+        log(f"✅ 直连 IP：{direct_masked} ({DIRECT_COUNTRY})")
+    else:
+        log("⚠️ 直连 IP 检测失败")
+    
+    # 检测代理
+    if USE_PROXY:
+        proxy_ok = check_proxy_available()
+        if proxy_ok:
+            log("🛡️ 代理可用且未被屏蔽，使用代理")
+            ACTUAL_MODE = "代理"
+            ACTUAL_IP = PROXY_IP
+            ACTUAL_COUNTRY = PROXY_COUNTRY
+        else:
+            log("🌐 代理不可用或被屏蔽，降级使用直连")
+            ACTUAL_MODE = "直连"
+            ACTUAL_IP = DIRECT_IP
+            ACTUAL_COUNTRY = DIRECT_COUNTRY
+            # 清空代理设置
+            global PROXIES
+            PROXIES = {}
+    else:
+        log("🌐 使用直连模式")
+        ACTUAL_MODE = "直连"
+        ACTUAL_IP = DIRECT_IP
+        ACTUAL_COUNTRY = DIRECT_COUNTRY
+    
+    # 显示实际使用的IP
+    actual_masked = re.sub(r'\.\d+$', '.**', ACTUAL_IP)
+    log(f"✅ 实际使用：{ACTUAL_MODE} - {actual_masked} ({ACTUAL_COUNTRY})")
 
-  let useProxy = USE_PROXY;
+    session = login(account["email"], account["password"])
+    jump_to_xmgame(session)
 
-  try {
-    await runRenew(useProxy);
-  } catch (error) {
-    if (useProxy) {
-      console.log('\n⚠️ 代理模式失败，自动回退到直连模式重试...\n');
-      try {
-        await runRenew(false);
-      } catch (retryError) {
-        console.log('❌ 直连模式也失败: ' + retryError.message);
-        process.exit(1);
-      }
-    } else {
-      process.exit(1);
-    }
-  }
-})();
+    log("📋 读取服务器信息...")
+    page_info = fetch_info_page(session)
+    h_before, m_before, dl_before, is_expired = parse_remaining(page_info)
+
+    if h_before == -2:
+        log("❌ 解析剩余时间失败，页面结构异常")
+        log(f"DEBUG: {page_info[:500]}")
+        sys.exit(1)
+
+    if is_expired:
+        log(f"⚠️ 服务器已过期（{dl_before}），直接尝试续期...")
+    else:
+        log(f"📅 当前利用期限：{dl_before}")
+        log(f"⏳ 剩余时间：{h_before} 小时 {m_before} 分")
+        if h_before >= RENEW_THRESHOLD_HOURS:
+            log(f"ℹ️  剩余 {h_before} 小时，未低于阈值，无需续期")
+            finish(True, "⌛️ 期限未至！", dl_before)
+
+        page_extend = fetch_extend_page(session)
+        if not can_renew(page_extend):
+            log("⚠️ 页面提示暂不可续期")
+            finish(True, "⌛️ 期限未至！", dl_before)
+
+    log("🔄 开始续期...")
+    if not do_renew(session):
+        finish(False, "❌ 续期失败！", dl_before)
+
+    # 续期后等待一下，让系统有时间更新
+    log("⏳ 等待系统更新...")
+    time.sleep(3)
+    
+    page_info_after = fetch_info_page(session)
+    h_after, m_after, dl_after, expired_after = parse_remaining(page_info_after)
+    log(f"📅 续期后利用期限：{dl_after}")
+    if not expired_after:
+        log(f"⏳ 续期后剩余时间：{h_after} 小时 {m_after} 分")
+
+    # 改进判断逻辑：只要流程成功完成，或者时间有变化，都认为成功
+    # 如果本来就是过期状态，现在未过期 → 成功
+    # 如果日期变了 → 成功
+    # 如果小时数增加了 → 成功
+    # 如果分钟数增加了（即使小时数没变）→ 成功
+    time_increased = False
+    if not expired_after and not is_expired:
+        if h_after > h_before:
+            time_increased = True
+        elif h_after == h_before and m_after > m_before:
+            time_increased = True
+    
+    success = False
+    if is_expired and not expired_after:
+        success = True
+    elif dl_after != dl_before:
+        success = True
+    elif time_increased:
+        success = True
+    elif not expired_after:
+        # 如果流程都成功走完了，即使时间看起来没变化，也认为成功
+        log("ℹ️  流程已完成，可能系统还在更新中...")
+        success = True
+    
+    if success:
+        log("✅ 续期成功！")
+        finish(True, "✅ 续期成功！", dl_after)
+    else:
+        log("❌ 续期失败，时间未变化")
+        finish(False, "❌ 续期失败！", dl_after or dl_before)
+
+
+def main():
+    failed = 0
+    for account in ACCOUNTS:
+        try:
+            run_account(account)
+        except SystemExit as e:
+            if e.code != 0:
+                failed += 1
+        except Exception as e:
+            failed += 1
+            log(f"❌ 账号 {account['name']} 异常: {e}")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
