@@ -1,182 +1,153 @@
-name: JustRunMy 自动续期 (无序随机版)
+name: XServer Extend (Node.js Matrix)
 
 on:
-  workflow_dispatch:
-  schedule:
-    # 每天北京时间 06:00 (UTC 22:00) 触发
-    - cron: '0 22 * * *'
+#schedule:
+#- cron: '0 22 * * *' # JST 07:00
+#- cron: '0 6 * * *'  # JST 15:00
+#- cron: '0 14 * * *' # JST 23:00
+workflow_dispatch:
+inputs:
+force:
+description: '强制续期，跳过预检'
+default: false
+required: false
+type: boolean
+
+permissions:
+contents: write
+actions: write
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      should_run: ${{ steps.check-schedule.outputs.should_run }}
-      base_delay: ${{ steps.pick-delay.outputs.base_delay }}
-      trigger_epoch: ${{ steps.pick-delay.outputs.trigger_epoch }}
-    steps:
-    - name: 📅 每日多账号随机签到
-      id: check-schedule
-      shell: bash
-      run: |
-        echo "should_run=true" >> $GITHUB_OUTPUT
-        echo "📅 每日签到模式已启动，所有账号将在不同时间执行"
+setup:
+runs-on: ubuntu-latest
+outputs:
+matrix: ${{ steps.set-matrix.outputs.matrix }}
+steps:
+- name: Checkout repository
+uses: actions/checkout@v4
 
-    - name: 🎲 计算基础延迟 (所有账号共享)
-      id: pick-delay
-      if: steps.check-schedule.outputs.should_run == 'true'
-      env:
-        RD: ${{ secrets.RD }}
-      run: |
-        if [ -n "$RD" ]; then
-          MIN=$(echo "$RD" | cut -d: -f1)
-          MAX=$(echo "$RD" | cut -d: -f2)
-        else
-          MIN=7200; MAX=21600
-        fi
-        DELAY=$(shuf -i $MIN-$MAX -n 1)
-        echo "base_delay=$DELAY" >> $GITHUB_OUTPUT
-        echo "trigger_epoch=$(date +%s)" >> $GITHUB_OUTPUT
-        H=$(( DELAY / 3600 )); M=$(( (DELAY % 3600) / 60 ))
-        echo "✅ 基础延迟: ${H}h${M}m，所有账号将在此之后分散执行"
+- name: Generate account list
+id: set-matrix
+shell: bash
+env:
+ALL_SECRETS: ${{ toJson(secrets) }}
+run: |
+         ACCOUNTS=$(echo "$ALL_SECRETS" | jq -r 'keys[] | select(startswith("EML_"))' | sed 's/EML_//' | shuf)
+         if [ -z "$ACCOUNTS" ]; then
+           HAS_SINGLE=$(echo "$ALL_SECRETS" | jq -r 'keys[] | select(. == "EML")')
+           if [ -n "$HAS_SINGLE" ]; then
+             echo "matrix=[\"SINGLE\"]" >> $GITHUB_OUTPUT
+           else
+             echo "Error: No EML_1 or EML secrets found."
+             exit 1
+           fi
+         else
+           INDEX_ARRAY=$(echo "$ACCOUNTS" | jq -R . | jq -s -c .)
+           echo "matrix=$INDEX_ARRAY" >> $GITHUB_OUTPUT
+         fi
 
-    - name: 🎲 生成账号矩阵
-      id: set-matrix
-      if: steps.check-schedule.outputs.should_run == 'true'
-      shell: bash
-      env:
-        ALL_SECRETS: ${{ toJson(secrets) }}
-      run: |
-        ACCOUNTS=$(echo "$ALL_SECRETS" | jq -r 'keys[] | select(startswith("EML_"))' | sed 's/EML_//' | shuf)
-        if [ -z "$ACCOUNTS" ]; then
-          echo "❌ 未检测到 EML_x 格式的 Secrets，请检查配置！"
-          exit 1
-        fi
-        INDEX_ARRAY=$(echo "$ACCOUNTS" | jq -R . | jq -s -c .)
-        echo "matrix=$INDEX_ARRAY" >> $GITHUB_OUTPUT
-        echo "✅ 账号矩阵已构建：$INDEX_ARRAY"
+ renew:
+needs: setup
+runs-on: ubuntu-latest
+strategy:
+fail-fast: false
+max-parallel: 1
+matrix:
+account_index: ${{ fromJson(needs.setup.outputs.matrix) }}
 
-  renew:
-    needs: setup
-    if: needs.setup.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    strategy:
-      max-parallel: 1
-      fail-fast: false
-      matrix:
-        account_index: ${{ fromJson(needs.setup.outputs.matrix) }}
+steps:
+- name: Checkout repository
+uses: actions/checkout@v4
 
-    steps:
-    - name: 📥 下载代码
-      uses: actions/checkout@v4
+- name: Cache state.json
+uses: actions/cache@v4
+with:
+path: status.json
+key: xserver-state-v1
 
-    - name: 🐍 设置 Python 环境
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+- name: Set up Node.js
+uses: actions/setup-node@v4
+with:
+node-version: '22'
 
-    - name: ⏳ 等待基础窗口 (只有第一个账号实际等待)
-      if: github.event_name == 'schedule'
-      run: |
-        NOW=$(date +%s)
-        TRIGGER=${{ needs.setup.outputs.trigger_epoch }}
-        BASE=${{ needs.setup.outputs.base_delay }}
-        ELAPSED=$(( NOW - TRIGGER ))
-        if [ $ELAPSED -lt $BASE ]; then
-          SLEEP=$(( BASE - ELAPSED ))
-          echo "账号 ${{ matrix.account_index }} 基础窗口等待 ${SLEEP}s..."
-          sleep $SLEEP
-        else
-          echo "账号 ${{ matrix.account_index }} 基础窗口已过，立即执行"
-        fi
+- name: Install Dependencies
+run: |
+         npm install
+         npx playwright install --with-deps chrome
+         sudo apt-get update
+         sudo apt-get install -y jq fonts-noto-cjk python3 wget
 
-    - name: 🛡️ 设置代理
-      env:
-        NODE_LINK: ${{ secrets.NODE_LINK }}
-      run: |
-        chmod +x setup_proxy.sh
-        ./setup_proxy.sh
+     - name: Start Proxy Tunnel
+env:
+NODE_LINK: ${{ secrets.NODE_LINK }}
+run: |
+         chmod +x setup_proxy.sh
+         bash setup_proxy.sh
 
-    - name: 🛠️ 安装自动化依赖
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb x11-utils xdotool fonts-noto-cjk
-        pip install seleniumbase requests
-        seleniumbase install chromedriver
+     - name: Run Extension Script
+env:
+ACC: ${{ matrix.account_index == 'SINGLE' && secrets.EML || secrets[format('EML_{0}', matrix.account_index)] }}
+ACC_PWD: ${{ matrix.account_index == 'SINGLE' && secrets.PWD || secrets[format('PWD_{0}', matrix.account_index)] }}
+TG_TOKEN: ${{ secrets.TG_TOKEN }}
+TG_ID: ${{ secrets.TG_ID }}
+PROXY_URL: ${{ secrets.PROXY_URL }}
+T: ${{ secrets.T }}
+GITHUB_EVENT_NAME: ${{ github.event_name }}
+FORCE: ${{ inputs.force || false }}
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          IS_PROXY: ${{ env.IS_PROXY }}
+          PROXY_IP: ${{ env.PROXY_IP }}
+          PROXY_COUNTRY: ${{ env.PROXY_COUNTRY }}
+run: node renew.js
 
-    - name: 🚀 运行账号 ${{ matrix.account_index }} 续期
-      env:
-        ACC: ${{ secrets[format('EML_{0}', matrix.account_index)] }}
-        ACC_PWD: ${{ secrets[format('PWD_{0}', matrix.account_index)] }}
-        TG_TOKEN: ${{ secrets.TG_TOKEN }}
-        TG_ID: ${{ secrets.TG_ID }}
-      run: |
-        echo "开始处理账号索引: ${{ matrix.account_index }}"
-        # 启动虚拟显示器并执行脚本
-        xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-          python reset_timer.py
+- name: Upload Screenshots
+if: always()
+uses: actions/upload-artifact@v4
+with:
+name: screenshots-${{ matrix.account_index }}
+path: "*.png"
+retention-days: 5
 
-    - name: ⏸️ 间隔等待 (前一个结束 1~3 分钟后下一个开始)
-      if: github.event_name == 'schedule' && success()
-      run: |
-        STAGGER=$(( RANDOM % 120 + 60 ))
-        echo "⏸️ 续期完成，等待 ${STAGGER}s 后执行下一个账号..."
-        sleep $STAGGER
+cleanup:
+needs: renew
+runs-on: ubuntu-latest
+if: always()
+steps:
+- name: Checkout repository
+uses: actions/checkout@v4
 
-    - name: 📸 调试文件上传 (无论成功失败)
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: debug-acc-${{ matrix.account_index }}
-        path: |
-          *.png
-          *.html
-          *.log
-        retention-days: 7
+- name: ⏱️ 更新运行记录
+env:
+GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+run: |
+         git config user.name "github-actions[bot]"
+         git config user.email "github-actions[bot]@users.noreply.github.com"
+         
+         if [ ! -f time.txt ]; then
+           echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+         else
+           echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+         fi
+         
+         git add time.txt
+         
+         if git diff --cached --quiet; then
+           echo "无变化，无需提交"
+         else
+           git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
+           git push origin HEAD:main || true
+         fi
 
-  cleanup:
-    needs: renew
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-    - name: 📥 下载代码
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
-    - name: ⏱️ 更新运行记录
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        
-        if [ ! -f time.txt ]; then
-          echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
-        else
-          echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
-        fi
-        
-        git add time.txt
-        
-        if git diff --cached --quiet; then
-          echo "无变化，无需提交"
-        else
-          git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
-          git push origin HEAD:main || true
-        fi
-
-    - name: 🧹 清理旧的工作流运行记录
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
-          count=0
-          for run_id in $runs; do
-            count=$((count + 1))
-            if [ $count -gt 1 ]; then
-              echo "删除运行记录: $run_id"
-              gh run delete $run_id || true
-            fi
-          done
+     - name: 🧹 清理旧的工作流运行记录
+env:
+GH_TOKEN: ${{ github.token }}
+run: |
+         runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+         count=0
+         for run_id in $runs; do
+           count=$((count + 1))
+           if [ $count -gt 1 ]; then
+             echo "删除运行记录: $run_id"
+             gh run delete $run_id || true
+           fi
+         done
