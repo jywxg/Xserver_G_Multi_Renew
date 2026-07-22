@@ -1,153 +1,149 @@
 name: XServer Extend (Node.js Matrix)
 
 on:
-#schedule:
-#- cron: '0 22 * * *' # JST 07:00
-#- cron: '0 6 * * *'  # JST 15:00
-#- cron: '0 14 * * *' # JST 23:00
-workflow_dispatch:
-inputs:
-force:
-description: '强制续期，跳过预检'
-default: false
-required: false
-type: boolean
+  #schedule:
+    #- cron: '0 22 * * *' # JST 07:00
+    #- cron: '0 6 * * *'  # JST 15:00
+    #- cron: '0 14 * * *' # JST 23:00
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制续期，跳过预检'
+        default: false
+        required: false
+        type: boolean
 
 permissions:
-contents: write
-actions: write
+  contents: write
+  actions: write
 
 jobs:
-setup:
-runs-on: ubuntu-latest
-outputs:
-matrix: ${{ steps.set-matrix.outputs.matrix }}
-steps:
-- name: Checkout repository
-uses: actions/checkout@v4
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-- name: Generate account list
-id: set-matrix
-shell: bash
-env:
-ALL_SECRETS: ${{ toJson(secrets) }}
-run: |
-         ACCOUNTS=$(echo "$ALL_SECRETS" | jq -r 'keys[] | select(startswith("EML_"))' | sed 's/EML_//' | shuf)
-         if [ -z "$ACCOUNTS" ]; then
-           HAS_SINGLE=$(echo "$ALL_SECRETS" | jq -r 'keys[] | select(. == "EML")')
-           if [ -n "$HAS_SINGLE" ]; then
-             echo "matrix=[\"SINGLE\"]" >> $GITHUB_OUTPUT
-           else
-             echo "Error: No EML_1 or EML secrets found."
-             exit 1
-           fi
-         else
-           INDEX_ARRAY=$(echo "$ACCOUNTS" | jq -R . | jq -s -c .)
-           echo "matrix=$INDEX_ARRAY" >> $GITHUB_OUTPUT
-         fi
+      - name: Generate account list
+        id: set-matrix
+        shell: bash
+        env:
+          ALL_SECRETS: ${{ toJson(secrets) }}
+        run: |
+          ACCOUNTS=$(echo "$ALL_SECRETS" | jq -r 'keys[] | select(startswith("EML_"))' | sed 's/EML_//' | shuf)
+          if [ -z "$ACCOUNTS" ]; then
+            HAS_SINGLE=$(echo "$ALL_SECRETS" | jq -r 'keys[] | select(. == "EML")')
+            if [ -n "$HAS_SINGLE" ]; then
+              echo "matrix=[\"SINGLE\"]" >> $GITHUB_OUTPUT
+            else
+              echo "Error: No EML_1 or EML secrets found."
+              exit 1
+            fi
+          else
+            INDEX_ARRAY=$(echo "$ACCOUNTS" | jq -R . | jq -s -c .)
+            echo "matrix=$INDEX_ARRAY" >> $GITHUB_OUTPUT
+          fi
 
- renew:
-needs: setup
-runs-on: ubuntu-latest
-strategy:
-fail-fast: false
-max-parallel: 1
-matrix:
-account_index: ${{ fromJson(needs.setup.outputs.matrix) }}
+  renew:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        account_index: ${{ fromJson(needs.setup.outputs.matrix) }}
 
-steps:
-- name: Checkout repository
-uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-- name: Cache state.json
-uses: actions/cache@v4
-with:
-path: status.json
-key: xserver-state-v1
+      - name: Cache state.json
+        uses: actions/cache@v4
+        with:
+          path: status.json
+          key: xserver-state-v1
 
-- name: Set up Node.js
-uses: actions/setup-node@v4
-with:
-node-version: '22'
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
-- name: Install Dependencies
-run: |
-         npm install
-         npx playwright install --with-deps chrome
-         sudo apt-get update
-         sudo apt-get install -y jq fonts-noto-cjk python3 wget
+      - name: Install Dependencies
+        run: |
+          npm install
+          npx playwright install --with-deps chrome
+          sudo apt-get update
+          sudo apt-get install -y jq fonts-noto-cjk python3 wget
 
-     - name: Start Proxy Tunnel
-env:
-NODE_LINK: ${{ secrets.NODE_LINK }}
-run: |
-         chmod +x setup_proxy.sh
-         bash setup_proxy.sh
-
-     - name: Run Extension Script
-env:
-ACC: ${{ matrix.account_index == 'SINGLE' && secrets.EML || secrets[format('EML_{0}', matrix.account_index)] }}
-ACC_PWD: ${{ matrix.account_index == 'SINGLE' && secrets.PWD || secrets[format('PWD_{0}', matrix.account_index)] }}
-TG_TOKEN: ${{ secrets.TG_TOKEN }}
-TG_ID: ${{ secrets.TG_ID }}
-PROXY_URL: ${{ secrets.PROXY_URL }}
-T: ${{ secrets.T }}
-GITHUB_EVENT_NAME: ${{ github.event_name }}
-FORCE: ${{ inputs.force || false }}
+      - name: Start Proxy Tunnel
+        env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
-          IS_PROXY: ${{ env.IS_PROXY }}
-          PROXY_IP: ${{ env.PROXY_IP }}
-          PROXY_COUNTRY: ${{ env.PROXY_COUNTRY }}
-run: node renew.js
+        run: |
+          chmod +x setup_proxy.sh
+          bash setup_proxy.sh
 
-- name: Upload Screenshots
-if: always()
-uses: actions/upload-artifact@v4
-with:
-name: screenshots-${{ matrix.account_index }}
-path: "*.png"
-retention-days: 5
+      - name: Run Extension Script
+        env:
+          ACC: ${{ matrix.account_index == 'SINGLE' && secrets.EML || secrets[format('EML_{0}', matrix.account_index)] }}
+          ACC_PWD: ${{ matrix.account_index == 'SINGLE' && secrets.PWD || secrets[format('PWD_{0}', matrix.account_index)] }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_ID: ${{ secrets.TG_ID }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          T: ${{ secrets.T }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          FORCE: ${{ inputs.force || false }}
+        run: node renew.js
 
-cleanup:
-needs: renew
-runs-on: ubuntu-latest
-if: always()
-steps:
-- name: Checkout repository
-uses: actions/checkout@v4
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.account_index }}
+          path: "*.png"
+          retention-days: 5
 
-- name: ⏱️ 更新运行记录
-env:
-GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-run: |
-         git config user.name "github-actions[bot]"
-         git config user.email "github-actions[bot]@users.noreply.github.com"
-         
-         if [ ! -f time.txt ]; then
-           echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
-         else
-           echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
-         fi
-         
-         git add time.txt
-         
-         if git diff --cached --quiet; then
-           echo "无变化，无需提交"
-         else
-           git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
-           git push origin HEAD:main || true
-         fi
+  cleanup:
+    needs: renew
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-     - name: 🧹 清理旧的工作流运行记录
-env:
-GH_TOKEN: ${{ github.token }}
-run: |
-         runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
-         count=0
-         for run_id in $runs; do
-           count=$((count + 1))
-           if [ $count -gt 1 ]; then
-             echo "删除运行记录: $run_id"
-             gh run delete $run_id || true
-           fi
-         done
+      - name: ⏱️ 更新运行记录
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [ ! -f time.txt ]; then
+            echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          else
+            echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          fi
+          
+          git add time.txt
+          
+          if git diff --cached --quiet; then
+            echo "无变化，无需提交"
+          else
+            git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
+            git push origin HEAD:main || true
+          fi
+
+      - name: 🧹 清理旧的工作流运行记录
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
