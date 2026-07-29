@@ -8,8 +8,8 @@ const TG_TOKEN = process.env.TG_TOKEN;
 const TG_ID = process.env.TG_ID;
 const NODE_LINK = process.env.NODE_LINK;
 
-// 代理与网络状态环境引入 (兼容 USE_PROXY 和 IS_PROXY)
-const USE_PROXY = process.env.USE_PROXY === 'true' || process.env.IS_PROXY === 'true';
+// 代理与网络状态环境引入
+const USE_PROXY = process.env.USE_PROXY === 'true';
 const PROXY_STATUS = process.env.PROXY_STATUS || '直连';
 
 // T 延迟控制（单位：分钟）
@@ -350,22 +350,6 @@ async function runRenew(useProxy) {
           proxyStatus = '代理: ' + proxyInfo;
         }
       } catch (e) { console.log('⚠️ IP 检查失败'); }
-
-      // 🔍 【新增】测试代理节点是否被 XServer 屏蔽或连接超时
-      console.log('🌐 测试 XServer 登录页连通性...');
-      try {
-        // 使用 context.request 发送轻量请求探测，避免等待页面资源导致超时
-        const res = await context.request.get(LOGIN_URL, { timeout: 10000 });
-        if (!res.ok()) {
-          throw new Error(`HTTP 状态码异常 (${res.status()})，可能被风控拦截`);
-        }
-        console.log('✅ XServer 连通正常');
-      } catch (e) {
-        // 抛出带特有标记的错误，以便外层识别
-        const proxyErr = new Error(`代理无法连接 XServer: ${e.message}`);
-        proxyErr.isProxyError = true;
-        throw proxyErr;
-      }
     }
 
     console.log('🌐 打开登录页面');
@@ -449,15 +433,8 @@ async function runRenew(useProxy) {
 
   } catch (error) {
     console.log('❌ 流程失败: ' + error.message);
-    
-    // 🔍 【优化】如果是代理不可用引起的错误，静默跳过 TG 通知，直接回退直连
-    if (useProxy && error.isProxyError) {
-      console.log('ℹ️ 代理节点被屏蔽或连接失败，不发送 TG 报警，静默回退直连...');
-    } else {
-      try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
-      await sendTG('❌', '续签失败', error.message, 'failure.png', proxyStatus);
-    }
-    
+    try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
+    await sendTG('❌', '续签失败', error.message, 'failure.png', proxyStatus);
     throw error;
   } finally {
     await context.close();
