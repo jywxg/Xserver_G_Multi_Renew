@@ -8,8 +8,9 @@ const TG_TOKEN = process.env.TG_TOKEN;
 const TG_ID = process.env.TG_ID;
 const NODE_LINK = process.env.NODE_LINK;
 
-// 代理与网络状态环境引入 (兼容 USE_PROXY 和 IS_PROXY)
-const USE_PROXY = process.env.USE_PROXY === 'true' || process.env.IS_PROXY === 'true';
+// 代理与网络状态环境引入 (完美兼容 USE_PROXY 和 IS_PROXY，支持布尔值或自定义代理 URL)
+const rawProxy = process.env.USE_PROXY || process.env.IS_PROXY;
+const USE_PROXY = rawProxy === 'true' || rawProxy === '1' || (typeof rawProxy === 'string' && rawProxy.length > 0 && rawProxy !== 'false' && rawProxy !== '0');
 const PROXY_STATUS = process.env.PROXY_STATUS || '直连';
 
 // T 延迟控制（单位：分钟）
@@ -328,7 +329,11 @@ async function runRenew(useProxy) {
   var launchOpts = { headless: true, channel: 'chrome' };
   
   if (useProxy) {
-    launchOpts.proxy = { server: 'socks5://127.0.0.1:1080' };
+    // 适配 IS_PROXY：若其包含协议头（如 socks5:// 或 http://），则直接作为代理地址；否则使用默认本地代理
+    const proxyServer = (typeof process.env.IS_PROXY === 'string' && process.env.IS_PROXY.includes('://'))
+      ? process.env.IS_PROXY
+      : (process.env.PROXY_SERVER || 'socks5://127.0.0.1:1080');
+    launchOpts.proxy = { server: proxyServer };
   }
   
   var browser = await chromium.launch(launchOpts);
@@ -367,7 +372,6 @@ async function runRenew(useProxy) {
     }
 
     console.log('🌐 打开登录页面');
-    // 【修改点】将 load 改为 domcontentloaded，防止被外部卡顿资源拖死
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.screenshot({ path: '1_navigation.png' });
 
@@ -378,7 +382,6 @@ async function runRenew(useProxy) {
 
     console.log('🖱️ 提交登录');
     await Promise.all([
-      // 【修改点】将 load 改为 domcontentloaded
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }),
       page.locator('input[name="action_user_login"]').click()
     ]);
@@ -450,7 +453,6 @@ async function runRenew(useProxy) {
   } catch (error) {
     console.log('❌ 流程失败: ' + error.message);
     
-    // 如果是代理不可用引起的错误，静默跳过 TG 通知，直接回退直连
     if (useProxy && error.isProxyError) {
       console.log('ℹ️ 代理节点被屏蔽或连接失败，不发送 TG 报警，静默回退直连...');
     } else {
