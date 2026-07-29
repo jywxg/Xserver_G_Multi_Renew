@@ -8,8 +8,8 @@ const TG_TOKEN = process.env.TG_TOKEN;
 const TG_ID = process.env.TG_ID;
 const NODE_LINK = process.env.NODE_LINK;
 
-// 代理与网络状态环境引入
-const USE_PROXY = process.env.USE_PROXY === 'true';
+// 代理与网络状态环境引入 (兼容 USE_PROXY 和 IS_PROXY)
+const USE_PROXY = process.env.USE_PROXY === 'true' || process.env.IS_PROXY === 'true';
 const PROXY_STATUS = process.env.PROXY_STATUS || '直连';
 
 // T 延迟控制（单位：分钟）
@@ -265,19 +265,19 @@ async function tryRenew(page, beforeMins, thresholdHours, proxyStatus) {
 
     await page.getByRole('link', { name: '期限を延長する' }).waitFor({ state: 'visible', timeout: 5000 });
     await page.getByRole('link', { name: '期限を延長する' }).click();
-    await page.waitForLoadState('load');
+    await page.waitForLoadState('domcontentloaded');
 
     await page.getByRole('button', { name: '確認画面に進む' }).click();
-    await page.waitForLoadState('load');
+    await page.waitForLoadState('domcontentloaded');
 
     console.log('🖱️ 执行延期...');
     await page.getByRole('button', { name: '期限を延長する' }).click();
-    await page.waitForLoadState('load');
+    await page.waitForLoadState('domcontentloaded');
     await page.screenshot({ path: '5_before_back.png' });
 
     console.log('✅ 延期成功，获取新剩余时间...');
     await page.getByRole('link', { name: '戻る' }).click();
-    await page.waitForLoadState('load');
+    await page.waitForLoadState('domcontentloaded');
     await page.screenshot({ path: 'success.png' });
 
     var afterMins = await parseRemainingMinutes(page);
@@ -342,7 +342,7 @@ async function runRenew(useProxy) {
     if (useProxy) {
       console.log('🌐 检查代理 IP...');
       try {
-        await page.goto('http://ip-api.com/json/', { timeout: 15000 });
+        await page.goto('http://ip-api.com/json/', { waitUntil: 'domcontentloaded', timeout: 15000 });
         const ipData = JSON.parse(await page.textContent('body'));
         if (ipData.status === 'success') {
           proxyInfo = `${ipData.query} (${ipData.countryCode})`;
@@ -350,10 +350,25 @@ async function runRenew(useProxy) {
           proxyStatus = '代理: ' + proxyInfo;
         }
       } catch (e) { console.log('⚠️ IP 检查失败'); }
+
+      // 🔍 测试代理节点是否被 XServer 屏蔽或连接超时
+      console.log('🌐 测试 XServer 登录页连通性...');
+      try {
+        const res = await context.request.get(LOGIN_URL, { timeout: 10000 });
+        if (!res.ok()) {
+          throw new Error(`HTTP 状态码异常 (${res.status()})，可能被风控拦截`);
+        }
+        console.log('✅ XServer 连通正常');
+      } catch (e) {
+        const proxyErr = new Error(`代理无法连接 XServer: ${e.message}`);
+        proxyErr.isProxyError = true;
+        throw proxyErr;
+      }
     }
 
     console.log('🌐 打开登录页面');
-    await page.goto(LOGIN_URL, { waitUntil: 'load', timeout: 30000 });
+    // 【修改点】将 load 改为 domcontentloaded，防止被外部卡顿资源拖死
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.screenshot({ path: '1_navigation.png' });
 
     console.log('📧 填写账号密码');
@@ -363,14 +378,15 @@ async function runRenew(useProxy) {
 
     console.log('🖱️ 提交登录');
     await Promise.all([
-      page.waitForNavigation({ waitUntil: 'load', timeout: 30000 }),
+      // 【修改点】将 load 改为 domcontentloaded
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }),
       page.locator('input[name="action_user_login"]').click()
     ]);
     await page.screenshot({ path: '2_after_login.png' });
 
     console.log('🚀 点击游戏管理');
     await page.getByRole('link', { name: 'ゲーム管理' }).click();
-    await page.waitForLoadState('load');
+    await page.waitForLoadState('domcontentloaded');
     await page.screenshot({ path: '3_game_manage.png' });
 
     var totalMins = await parseRemainingMinutes(page);
@@ -433,8 +449,15 @@ async function runRenew(useProxy) {
 
   } catch (error) {
     console.log('❌ 流程失败: ' + error.message);
-    try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
-    await sendTG('❌', '续签失败', error.message, 'failure.png', proxyStatus);
+    
+    // 如果是代理不可用引起的错误，静默跳过 TG 通知，直接回退直连
+    if (useProxy && error.isProxyError) {
+      console.log('ℹ️ 代理节点被屏蔽或连接失败，不发送 TG 报警，静默回退直连...');
+    } else {
+      try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
+      await sendTG('❌', '续签失败', error.message, 'failure.png', proxyStatus);
+    }
+    
     throw error;
   } finally {
     await context.close();
