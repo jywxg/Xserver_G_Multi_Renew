@@ -6,9 +6,8 @@ const ACC = process.env.ACC || process.env.EML;
 const ACC_PWD = process.env.ACC_PWD || process.env.PWD;
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_ID = process.env.TG_ID;
-const NODE_LINK = process.env.NODE_LINK;
 
-// 代理与网络状态环境引入 (完美兼容 USE_PROXY 和 IS_PROXY，支持布尔值或自定义代理 URL)
+// 代理与网络状态环境引入
 const rawProxy = process.env.USE_PROXY || process.env.IS_PROXY;
 const USE_PROXY = rawProxy === 'true' || rawProxy === '1' || (typeof rawProxy === 'string' && rawProxy.length > 0 && rawProxy !== 'false' && rawProxy !== '0');
 const PROXY_STATUS = process.env.PROXY_STATUS || '直连';
@@ -32,105 +31,82 @@ if (T && !IS_MANUAL) {
 if (IS_MANUAL) console.log('🖱️ 手动触发模式，跳过延迟');
 
 const LOGIN_URL = 'https://secure.xserver.ne.jp/xapanel/login/xmgame';
-const STATUS_FILE = 'status.json';
 
 // 时区：续期页面时间为日本时间 (JST, UTC+9)
 const TZ_OFFSET = 9;
 
-// ── 状态持久化 ──
-
-function loadStatus() {
-  try {
-    if (fs.existsSync(STATUS_FILE)) return JSON.parse(fs.readFileSync(STATUS_FILE, 'utf8'));
-  } catch (e) {}
-  return {};
-}
-
-function saveStatus(data) {
-  fs.writeFileSync(STATUS_FILE, JSON.stringify(data, null, 2));
-}
-
-function getAccountStatus() {
-  return loadStatus()[ACC] || {};
-}
-
-// ── 日期工具 ──
+// ── 日期与工具函数 ──
 
 function getNowJST() {
   return new Date(Date.now() + TZ_OFFSET * 3600000);
 }
 
-function getTodayStr() {
-  return getNowJST().toISOString().slice(0, 10);
-}
-
-function getNowJSTMinutes() {
-  var d = getNowJST();
-  return d.getUTCHours() * 60 + d.getUTCMinutes();
-}
-
-function addDaysStr(dateStr, days) {
-  const d = new Date(dateStr);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
 function fmtHours(h) {
-  if (h === null || h === undefined) return '?';
+  if (h === null || h === undefined || isNaN(h)) return '?';
   if (h >= 10) return Math.round(h) + 'h';
   if (h >= 1) return h.toFixed(1) + 'h';
   return Math.round(h * 60) + 'm';
 }
 
 function fmtMinutes(min) {
-  if (min === null || min === undefined) return '?';
+  if (min === null || min === undefined || isNaN(min)) return '?';
   var h = Math.floor(min / 60), m = min % 60;
   return h > 0 ? h + 'h' + m + 'm' : m + 'm';
 }
 
-// ── Telegram 通知（带每日去重）──
+// ── Cloudflare Cron 自动更新 ──
 
-async function sendTGOnce(statusIcon, statusText, extra, imagePath, proxyStatus) {
-  if (!TG_TOKEN || !TG_ID) return;
-  var today = getTodayStr();
-  var s = getAccountStatus();
-  if (s.notifiedDate === today) {
-    console.log('🔇 今日已通知过，跳过');
+async function updateCfCron(totalRemainingMinutes, thresholdHours) {
+  const cfAccountId = process.env.CF_ACCOUNT_ID;
+  const cfScriptName = process.env.CF_SCRIPT_NAME;
+  const cfApiToken = process.env.CF_API_TOKEN;
+
+  if (!cfAccountId || !cfScriptName || !cfApiToken) {
+    console.log('\n⚠️ 未配置完整的 Cloudflare 变量，跳过 Cron 更新');
     return;
   }
-  extra = extra || '';
-  imagePath = imagePath || null;
-  proxyStatus = proxyStatus || PROXY_STATUS;
+
+  let cronStr = '';
+  if (totalRemainingMinutes === null || totalRemainingMinutes < 0 || isNaN(totalRemainingMinutes)) {
+    cronStr = '0 */2 * * *';
+    console.log('\n⚠️ 账号状态异常或未取得剩余时间，Cron 兜底设为每 2 小时运行: 0 */2 * * *');
+  } else {
+    const thresholdMins = (thresholdHours || 16) * 60;
+    // 提前 30 分钟触发，确保在可续期窗口内触发
+    const waitMinutes = Math.max(10, totalRemainingMinutes - (thresholdMins - 30));
+    const nextRunUtc = new Date(Date.now() + waitMinutes * 60000);
+
+    const min = nextRunUtc.getUTCMinutes();
+    const hour = nextRunUtc.getUTCHours();
+    const day = nextRunUtc.getUTCDate();
+    const month = nextRunUtc.getUTCMonth() + 1; // getUTCMonth 返回 0-11，需加 1
+
+    cronStr = `${min} ${hour} ${day} ${month} *`;
+    console.log(`\n⏱️ 预计下次续期触发时间 (UTC): ${nextRunUtc.toISOString().replace('T', ' ').slice(0, 19)}`);
+    console.log(`⏱️ 写入 Cloudflare Worker 的 Cron 表达式: ${cronStr}`);
+  }
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${cfAccountId}/workers/scripts/${cfScriptName}/schedules`;
   try {
-    var time = getNowJST().toISOString().replace('T', ' ').slice(0, 19);
-    var cnTime = new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(11, 16);
-    
-    var text = 'XServer 延期提醒\n' + statusIcon + ' ' + statusText + '\n' + extra + '\n🌐 网络: ' + proxyStatus + '\n账号: ' + ACC + '\n时间: ' + time + ' (JST) / ' + cnTime + ' (CST)';
-    
-    if (imagePath && fs.existsSync(imagePath)) {
-      var fileData = fs.readFileSync(imagePath);
-      var fd = new FormData();
-      fd.append('chat_id', TG_ID);
-      fd.append('caption', text);
-      fd.append('photo', new Blob([fileData], { type: 'image/png' }), path.basename(imagePath));
-      var res = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendPhoto', { method: 'POST', body: fd });
-      if (res.ok) console.log('✅ TG 通知已发送');
-      else console.log('⚠️ TG 发送失败:', res.status, await res.text());
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${cfApiToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify([{ cron: cronStr }])
+    });
+    if (res.ok) {
+      console.log('✅ 成功更新 Cloudflare Worker 的定时触发器！');
     } else {
-      var res2 = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: TG_ID, text: text })
-      });
-      if (res2.ok) console.log('✅ TG 通知已发送');
-      else console.log('⚠️ TG 发送失败:', res2.status, await res2.text());
+      console.log(`❌ 更新 Cloudflare Cron 失败: ${res.status} - ${await res.text()}`);
     }
-    var status = loadStatus();
-    if (!status[ACC]) status[ACC] = {};
-    status[ACC].notifiedDate = today;
-    saveStatus(status);
-  } catch (e) { console.log('⚠️ TG 发送失败:', e.message); }
+  } catch (e) {
+    console.log(`❌ 调用 Cloudflare API 出错: ${e.message}`);
+  }
 }
+
+// ── Telegram 通知 ──
 
 async function sendTG(statusIcon, statusText, extra, imagePath, proxyStatus) {
   if (!TG_TOKEN || !TG_ID) return;
@@ -162,51 +138,6 @@ async function sendTG(statusIcon, statusText, extra, imagePath, proxyStatus) {
       else console.log('⚠️ TG 发送失败:', res2.status, await res2.text());
     }
   } catch (e) { console.log('⚠️ TG 发送失败:', e.message); }
-}
-
-// ── 调度 ──
-
-function checkScheduling() {
-  const today = getTodayStr();
-  const s = getAccountStatus();
-  if (!s.nextCheckDate) { console.log('🆕 首次运行'); return; }
-  // force 模式跳过预检
-  if (process.env.FORCE === 'true') { console.log('💪 强制模式，跳过预检'); return; }
-  if (process.env.GITHUB_EVENT_NAME !== 'schedule') { console.log('💻 手动触发'); return; }
-  if (today < s.nextCheckDate) {
-    var days = Math.ceil((new Date(s.nextCheckDate) - new Date(today)) / 86400000);
-    console.log('⏳ 预约 ' + s.nextCheckDate + '，还剩 ' + days + ' 天，秒退');
-    process.exit(0);
-  }
-  console.log('📅 到达预约日期 ' + today);
-}
-
-function updateNextCheckDate(daysLater, reason) {
-  var next = addDaysStr(getTodayStr(), daysLater);
-  var status = loadStatus();
-  if (!status[ACC]) status[ACC] = {};
-  status[ACC].nextCheckDate = next;
-  delete status[ACC].notifiedDate;
-  saveStatus(status);
-  console.log('📅 下次预约: ' + next + '（' + reason + '）');
-}
-
-function updateNextCheckDateByDate(dateStr, reason) {
-  var status = loadStatus();
-  if (!status[ACC]) status[ACC] = {};
-  status[ACC].nextCheckDate = dateStr;
-  saveStatus(status);
-  console.log('📅 下次预约: ' + dateStr + '（' + reason + '）');
-}
-
-async function setTodayAndExit(msg, proxyStatus) {
-  console.log('🔄 ' + msg + '，设今天为预约日继续轮询');
-  var status = loadStatus();
-  if (!status[ACC]) status[ACC] = {};
-  status[ACC].nextCheckDate = getTodayStr();
-  saveStatus(status);
-  await sendTGOnce('🧊', '等待可续期', msg, null, proxyStatus);
-  process.exit(0);
 }
 
 // ── 页面解析 ──
@@ -264,20 +195,21 @@ async function tryRenew(page, beforeMins, thresholdHours, proxyStatus) {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await page.waitForTimeout(2000);
 
-    await page.getByRole('link', { name: '期限を延長する' }).waitFor({ state: 'visible', timeout: 5000 });
-    await page.getByRole('link', { name: '期限を延長する' }).click();
+    // 增加 .first() 防御严格模式
+    await page.getByRole('link', { name: '期限を延長する' }).first().waitFor({ state: 'visible', timeout: 5000 });
+    await page.getByRole('link', { name: '期限を延長する' }).first().click();
     await page.waitForLoadState('domcontentloaded');
 
-    await page.getByRole('button', { name: '確認画面に進む' }).click();
+    await page.getByRole('button', { name: '確認画面に進む' }).first().click();
     await page.waitForLoadState('domcontentloaded');
 
     console.log('🖱️ 执行延期...');
-    await page.getByRole('button', { name: '期限を延長する' }).click();
+    await page.getByRole('button', { name: '期限を延長する' }).first().click();
     await page.waitForLoadState('domcontentloaded');
     await page.screenshot({ path: '5_before_back.png' });
 
     console.log('✅ 延期成功，获取新剩余时间...');
-    await page.getByRole('link', { name: '戻る' }).click();
+    await page.getByRole('link', { name: '戻る' }).first().click();
     await page.waitForLoadState('domcontentloaded');
     await page.screenshot({ path: 'success.png' });
 
@@ -287,31 +219,13 @@ async function tryRenew(page, beforeMins, thresholdHours, proxyStatus) {
     var timeInfo = '续签前 ' + beforeH + ' → 续签后 ' + afterH;
     console.log('⏱️ ' + timeInfo);
 
-    var nextDays = 3;
-    var persistThreshold = thresholdHours;
-    if (persistThreshold === null) {
-      var s2 = getAccountStatus();
-      persistThreshold = s2.thresholdHours || 16;
-    }
-    if (afterMins !== null) {
-      var newH = afterMins / 60;
-      var calcDays = Math.ceil((newH - persistThreshold) / 24);
-      nextDays = Math.max(1, calcDays);
-      console.log('📐 续期后剩余 ' + fmtHours(newH) + '，阈值 ' + persistThreshold + 'h，约 ' + nextDays + ' 天后复查');
-    }
-
-    var status = loadStatus();
-    if (!status[ACC]) status[ACC] = {};
-    status[ACC].lastSuccess = Date.now();
-    saveStatus(status);
-    updateNextCheckDate(nextDays, '续签成功');
-    await sendTG('✅', '续签成功', timeInfo + '\n下次检查' + nextDays + '天后', 'success.png', proxyStatus);
+    await sendTG('✅', '续签成功', timeInfo, 'success.png', proxyStatus);
+    await updateCfCron(afterMins, thresholdHours || 16);
   } catch (e) {
     console.log('⚠️ 未找到延期按钮');
     await page.screenshot({ path: 'skip.png' });
-    var s = getAccountStatus();
-    if (!s.lastSuccess) await sendTG('🕐', '等待中', '按钮未出现', 'skip.png', proxyStatus);
-    else await sendTG('⚠️', '跳过', '未到时间', 'skip.png', proxyStatus);
+    await sendTG('⚠️', '跳过', '未到时间或无法点击续期按钮', 'skip.png', proxyStatus);
+    await updateCfCron(beforeMins, thresholdHours || 16);
   }
 }
 
@@ -322,17 +236,17 @@ async function runRenew(useProxy) {
   let proxyInfo = '';
   
   console.log('==================================================');
-  console.log('XServer 自动延期 (Cache 版)');
+  console.log('XServer 自动延期 (Cloudflare Cron 版)');
   console.log('==================================================');
   console.log('🌐 网络模式: ' + proxyStatus);
 
   var launchOpts = { headless: true, channel: 'chrome' };
   
   if (useProxy) {
-    // 适配 IS_PROXY：若其包含协议头（如 socks5:// 或 http://），则直接作为代理地址；否则使用默认本地代理
+    // 修正：兼容读取 PROXY_URL 环境变量
     const proxyServer = (typeof process.env.IS_PROXY === 'string' && process.env.IS_PROXY.includes('://'))
       ? process.env.IS_PROXY
-      : (process.env.PROXY_SERVER || 'socks5://127.0.0.1:1080');
+      : (process.env.PROXY_URL || process.env.PROXY_SERVER || 'socks5://127.0.0.1:1080');
     launchOpts.proxy = { server: proxyServer };
   }
   
@@ -356,13 +270,10 @@ async function runRenew(useProxy) {
         }
       } catch (e) { console.log('⚠️ IP 检查失败'); }
 
-      // 🔍 测试代理节点是否被 XServer 屏蔽或连接超时
       console.log('🌐 测试 XServer 登录页连通性...');
       try {
         const res = await context.request.get(LOGIN_URL, { timeout: 10000 });
-        if (!res.ok()) {
-          throw new Error(`HTTP 状态码异常 (${res.status()})，可能被风控拦截`);
-        }
+        if (!res.ok()) throw new Error(`HTTP 状态码异常 (${res.status()})`);
         console.log('✅ XServer 连通正常');
       } catch (e) {
         const proxyErr = new Error(`代理无法连接 XServer: ${e.message}`);
@@ -383,62 +294,30 @@ async function runRenew(useProxy) {
     console.log('🖱️ 提交登录');
     await Promise.all([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }),
-      page.locator('input[name="action_user_login"]').click()
+      page.locator('input[name="action_user_login"]').first().click()
     ]);
     await page.screenshot({ path: '2_after_login.png' });
 
     console.log('🚀 点击游戏管理');
-    await page.getByRole('link', { name: 'ゲーム管理' }).click();
+    await page.getByRole('link', { name: 'ゲーム管理' }).first().click();
     await page.waitForLoadState('domcontentloaded');
     await page.screenshot({ path: '3_game_manage.png' });
 
     var totalMins = await parseRemainingMinutes(page);
 
     console.log('🚀 进入续期页面');
-    await page.getByRole('link', { name: 'アップグレード・期限延長' }).click();
+    await page.getByRole('link', { name: 'アップグレード・期限延長' }).first().click();
     await page.screenshot({ path: '4_renew_page.png' });
 
     var extendInfo = await parseExtendPage(page);
 
     if (extendInfo.restricted) {
-      thresholdHours = extendInfo.thresholdHours;
-
-      var st = loadStatus();
-      if (!st[ACC]) st[ACC] = {};
-      st[ACC].thresholdHours = thresholdHours;
-      saveStatus(st);
-
-      if (extendInfo.nextDate && extendInfo.nextDate > getTodayStr()) {
-        console.log('📅 预约 ' + extendInfo.nextDate + ' 再检查');
-        await sendTGOnce('🧊', '冷却等待', '可续期: ' + extendInfo.nextDate + ' ' + (extendInfo.nextTime || ''), null, proxyStatus);
-        updateNextCheckDateByDate(extendInfo.nextDate, '冷却中');
-        success = true;
-        return success;
-      }
-
-      if (extendInfo.nextDate === getTodayStr() && extendInfo.nextMinutes !== null) {
-        var nowMin = getNowJSTMinutes();
-        var waitMin = extendInfo.nextMinutes - nowMin;
-        if (waitMin > 0) {
-          await setTodayAndExit('还需 ' + fmtMinutes(waitMin) + ' 后可续期', proxyStatus);
-        }
-      }
-
-      if (totalMins !== null && thresholdHours !== null) {
-        var h = totalMins / 60;
-        if (h > thresholdHours) {
-          var hoursToGo = h - thresholdHours;
-          var days = Math.max(1, Math.ceil(hoursToGo / 24));
-          console.log('🔭 剩余 ' + fmtHours(h) + ' > 阈值 ' + thresholdHours + 'h，预约 ' + days + ' 天后');
-          await sendTGOnce('🔭', '探测跳过', '剩余 ' + fmtHours(h) + '，预约 ' + days + ' 天后查', null, proxyStatus);
-          updateNextCheckDate(days, '等待进入可续期窗口');
-          success = true;
-          return success;
-        }
-        console.log('⚠️ 剩余时间已达标但页面受限，尝试续期');
-      } else {
-        console.log('⚠️ 无法分析，尝试直接续期');
-      }
+      thresholdHours = extendInfo.thresholdHours || 16;
+      console.log(`ℹ️ 尚未达到续期阈值（阈值: ${thresholdHours}小时）`);
+      await sendTG('⌛️', '未到续期时间', `当前剩余: ${fmtHours(totalMins ? totalMins / 60 : 0)}`, null, proxyStatus);
+      await updateCfCron(totalMins, thresholdHours);
+      success = true;
+      return success;
     }
 
     if (DELAY_MS > 0) {
@@ -453,13 +332,14 @@ async function runRenew(useProxy) {
   } catch (error) {
     console.log('❌ 流程失败: ' + error.message);
     
+    // 如果是因为代理被阻断，则不发送失败通知，直接留给直连重试处理
     if (useProxy && error.isProxyError) {
-      console.log('ℹ️ 代理节点被屏蔽或连接失败，不发送 TG 报警，静默回退直连...');
+      console.log('ℹ️ 代理节点被屏蔽，准备回退到直连模式...');
     } else {
       try { await page.screenshot({ path: 'failure.png' }); } catch (e) {}
-      await sendTG('❌', '续签失败', error.message, 'failure.png', proxyStatus);
+      await sendTG('❌', '运行异常', error.message, 'failure.png', proxyStatus);
+      await updateCfCron(-1, -1);
     }
-    
     throw error;
   } finally {
     await context.close();
@@ -470,7 +350,6 @@ async function runRenew(useProxy) {
 
 (async function main() {
   if (!ACC || !ACC_PWD) { console.log('❌ 未找到账号或密码'); process.exit(1); }
-  checkScheduling();
 
   let useProxy = USE_PROXY;
 
