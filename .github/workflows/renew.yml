@@ -123,7 +123,8 @@ jobs:
             echo "无变化，无需提交"
           else
             git commit -m "⏱️ 自动更新运行记录，保活 Actions [skip ci]"
-            git pull origin HEAD:${GITHUB_REF_NAME} --rebase || true
+            # ✅ 正确合并远程分支，防止 multi-matrix 时的推送冲突
+            git pull origin ${GITHUB_REF_NAME} --rebase || true
             git push origin HEAD:${GITHUB_REF_NAME}
           fi
 
