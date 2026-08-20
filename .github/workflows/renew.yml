@@ -1,6 +1,10 @@
-name: XServer Extend (Node.js)
+name: XServer Extend (Node.js Matrix)
 
 on:
+  #schedule:
+    #- cron: '0 22 * * *' # JST 07:00
+    #- cron: '0 6 * * *'  # JST 15:00
+    #- cron: '0 14 * * *' # JST 23:00
   workflow_dispatch:
     inputs:
       force:
@@ -8,8 +12,6 @@ on:
         default: false
         required: false
         type: boolean
-  repository_dispatch:
-    types: [renew-trigger]
 
 permissions:
   contents: write
@@ -21,10 +23,10 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: 📥 拉取仓库
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🧩 动态解析账号列表
+      - name: Generate account list
         id: set-matrix
         shell: bash
         env:
@@ -47,7 +49,6 @@ jobs:
   renew:
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -55,30 +56,35 @@ jobs:
         account_index: ${{ fromJson(needs.setup.outputs.matrix) }}
 
     steps:
-      - name: 📥 拉取仓库
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🟢 设置 Node.js 环境
+      - name: Cache state.json
+        uses: actions/cache@v4
+        with:
+          path: status.json
+          key: xserver-state-v1
+
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: 📦 安装依赖及浏览器
+      - name: Install Dependencies
         run: |
           npm install
           npx playwright install --with-deps chrome
           sudo apt-get update
-          sudo apt-get install -y jq fonts-noto-cjk
+          sudo apt-get install -y jq fonts-noto-cjk python3 wget
 
-      - name: ⚙️ 设置代理环境
-        continue-on-error: true
+      - name: Start Proxy Tunnel
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           chmod +x setup_proxy.sh
           bash setup_proxy.sh
 
-      - name: 🔧 执行自动续期
+      - name: Run Extension Script
         env:
           ACC: ${{ matrix.account_index == 'SINGLE' && secrets.EML || secrets[format('EML_{0}', matrix.account_index)] }}
           ACC_PWD: ${{ matrix.account_index == 'SINGLE' && secrets.PWD || secrets[format('PWD_{0}', matrix.account_index)] }}
@@ -88,12 +94,9 @@ jobs:
           T: ${{ secrets.T }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           FORCE: ${{ inputs.force || false }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_SCRIPT_NAME: ${{ secrets.CF_SCRIPT_NAME }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: node renew.js
 
-      - name: 🖼️ 上传截图留存
+      - name: Upload Screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -106,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: 📥 拉取仓库
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: ⏱️ 更新运行记录
@@ -116,26 +119,31 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          echo "最后运行时间: $(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          if [ ! -f time.txt ]; then
+            echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          else
+            echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          fi
+          
           git add time.txt
           
           if git diff --cached --quiet; then
             echo "无变化，无需提交"
           else
-            git commit -m "⏱️ 自动更新运行记录，保活 Actions [skip ci]"
-            # ✅ 正确合并远程分支，防止 multi-matrix 时的推送冲突
-            git pull origin ${GITHUB_REF_NAME} --rebase || true
-            git push origin HEAD:${GITHUB_REF_NAME}
+            git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
+            git push origin HEAD:main || true
           fi
 
-      - name: 🧹 清理历史运行记录
+      - name: 🧹 清理旧的工作流运行记录
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          runs=$(gh run list --workflow="${{ github.workflow }}" -L 100 --json databaseId --jq '.[].databaseId')
-          for run in $runs; do
-            if [ "$run" != "$GITHUB_RUN_ID" ]; then
-              echo "🗑️ 正在删除多余的历史记录 ID: $run"
-              gh run delete "$run" || true
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
             fi
           done
